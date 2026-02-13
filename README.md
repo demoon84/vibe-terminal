@@ -1,6 +1,6 @@
 # vibe-terminal-layout-system
 
-4-agent terminal orchestration app focused on uninterrupted multi-task workflows.
+4-agent terminal app focused on uninterrupted multi-task workflows.
 
 ## Electron Scaffold (New)
 

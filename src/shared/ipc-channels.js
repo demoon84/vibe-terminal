@@ -1,0 +1,37 @@
+const IPC_CHANNELS = Object.freeze({
+  PTY_CREATE: "pty:create",
+  PTY_WRITE: "pty:write",
+  PTY_RESIZE: "pty:resize",
+  PTY_KILL: "pty:kill",
+  PTY_CHANGE_DIRECTORY: "pty:change-directory",
+  PTY_DATA: "pty:data",
+  PTY_EXIT: "pty:exit",
+  PTY_STATUS: "pty:status",
+
+  LAYOUT_SET_PRESET: "layout:setPreset",
+  LAYOUT_RESTORE: "layout:restore",
+
+  APP_RENDERER_UNLOADING: "app:renderer-unloading",
+  APP_WINDOW_MINIMIZE: "app:window-minimize",
+  APP_WINDOW_MAXIMIZE_TOGGLE: "app:window-maximize-toggle",
+  APP_WINDOW_DEVTOOLS_TOGGLE: "app:window-devtools-toggle",
+  APP_WINDOW_CLOSE: "app:window-close",
+  APP_WINDOW_STATE: "app:window-state",
+  APP_PICK_DIRECTORY: "app:pick-directory",
+  APP_PICK_FILES: "app:pick-files",
+  APP_AGENT_INSTALL_STATUS: "app:agent-install-status",
+  APP_AGENT_INSTALL_LATEST: "app:agent-install-latest",
+  APP_PWSH7_STATUS: "app:pwsh7-status",
+  APP_PWSH7_INSTALL: "app:pwsh7-install",
+  APP_NODE_RUNTIME_STATUS: "app:node-runtime-status",
+  APP_TERMINAL_COLOR_DIAGNOSTICS: "app:terminal-color-diagnostics",
+  APP_CODEX_MODEL_CATALOG: "app:codex-model-catalog",
+  APP_GEMINI_MODEL_CATALOG: "app:gemini-model-catalog",
+  APP_CLIPBOARD_READ: "app:clipboard-read",
+  APP_CLIPBOARD_IMAGE_TO_TEMP: "app:clipboard-image-to-temp",
+  APP_CLIPBOARD_WRITE: "app:clipboard-write",
+});
+
+module.exports = {
+  IPC_CHANNELS,
+};

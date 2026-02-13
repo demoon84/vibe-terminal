@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "defaultPresetId": "1x4",
+  "presets": [
+    {
+      "id": "1x4",
+      "name": "2x2 4분할",
+      "rows": 2,
+      "columns": 2,
+      "panelCount": 4
+    },
+    {
+      "id": "2x6",
+      "name": "2단 6분할",
+      "rows": 2,
+      "columns": 3,
+      "panelCount": 6
+    },
+    {
+      "id": "2x8",
+      "name": "2단 8분할",
+      "rows": 2,
+      "columns": 4,
+      "panelCount": 8
+    },
+    {
+      "id": "3x12",
+      "name": "3x4 12분할",
+      "rows": 3,
+      "columns": 4,
+      "panelCount": 12
+    }
+  ],
+  "constraints": {
+    "minPanelWidthPx": 220,
+    "minPanelHeightPx": 160,
+    "splitterSizePx": 8,
+    "splitterHitAreaPx": 16
+  }
+}

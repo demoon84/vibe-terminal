@@ -1,0 +1,58 @@
+{
+  "name": "vibe-terminal-layout-system",
+  "version": "1.0.2",
+  "private": true,
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "electron:start": "electron .",
+    "electron:dev": "nodemon --config nodemon.electron.json",
+    "rebuild:native": "electron-builder install-app-deps",
+    "package": "electron-builder --win portable",
+    "package:installer": "electron-builder --win nsis",
+    "package:dir": "electron-builder --win dir",
+    "check": "node scripts/check-syntax.js",
+    "security:deps": "node scripts/dependency-security-scan.js",
+    "test": "node --test",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "dotenv": "^17.2.4",
+    "express": "^4.21.2",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^26.7.0",
+    "nodemon": "^3.1.11"
+  },
+  "build": {
+    "appId": "com.vibe-terminal.app",
+    "productName": "Vibe Terminal",
+    "asar": true,
+    "npmRebuild": true,
+    "buildDependenciesFromSource": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/app-icon.ico"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable-${arch}.${ext}"
+    }
+  }
+}
