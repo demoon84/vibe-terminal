@@ -9,3 +9,6 @@ pnpm-debug.log*
 .env.*.local
 .idea
 release
+package-lock.json
+.DS_Store
+.codex/
