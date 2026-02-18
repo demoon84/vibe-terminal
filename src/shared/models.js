@@ -66,7 +66,7 @@ const LAYOUT_CONSTRAINTS = Object.freeze({
 });
 
 const PRESET_LAYOUT_SPEC = Object.freeze({
-  defaultPresetId: PRESET_IDS.ONE_BY_FOUR,
+  defaultPresetId: PRESET_IDS.ONE_BY_TWO,
   presets: PRESET_DEFINITIONS,
   constraints: LAYOUT_CONSTRAINTS,
 });

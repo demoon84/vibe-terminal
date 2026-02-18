@@ -35,13 +35,13 @@ function sortBySlot(a, b) {
 
 class LayoutManager {
   constructor(options = {}) {
-    const { sessionManager, defaultPresetId = PRESET_IDS.ONE_BY_FOUR } = options;
+    const { sessionManager, defaultPresetId = PRESET_IDS.ONE_BY_TWO } = options;
     if (!sessionManager) {
       throw new Error("LayoutManager requires sessionManager");
     }
 
     this.sessionManager = sessionManager;
-    this.defaultPresetId = isPresetId(defaultPresetId) ? defaultPresetId : PRESET_IDS.ONE_BY_FOUR;
+    this.defaultPresetId = isPresetId(defaultPresetId) ? defaultPresetId : PRESET_IDS.ONE_BY_TWO;
     this.maxPaneCount = getMaxPanelCount();
     this.activeLayout = {
       presetId: this.defaultPresetId,
@@ -204,7 +204,7 @@ class LayoutManager {
 
     const presetId = isPresetId(persistedLayout.presetId)
       ? persistedLayout.presetId
-      : PRESET_IDS.ONE_BY_FOUR;
+      : PRESET_IDS.ONE_BY_TWO;
     const panes = this._normalizePersistedPanes(persistedLayout.panes, presetId);
     const sessionSnapshotById = new Map();
 
@@ -215,20 +215,19 @@ class LayoutManager {
     }
 
     for (const pane of panes) {
+      if (pane.state !== "visible") {
+        pane.sessionId = null;
+        continue;
+      }
+
       if (!pane.sessionId) {
-        if (pane.state === "visible") {
-          pane.sessionId = this._createSession({}).id;
-        }
+        pane.sessionId = this._createSession({}).id;
         continue;
       }
 
       const snapshot = sessionSnapshotById.get(pane.sessionId);
       if (!snapshot) {
-        if (pane.state === "visible") {
-          pane.sessionId = this._createSession({}).id;
-        } else {
-          pane.sessionId = null;
-        }
+        pane.sessionId = this._createSession({}).id;
         continue;
       }
 
@@ -236,11 +235,7 @@ class LayoutManager {
         const recovered = this.sessionManager.recoverSession(snapshot);
         pane.sessionId = recovered.id;
       } catch (_error) {
-        if (pane.state === "visible") {
-          pane.sessionId = this._createSession({}).id;
-        } else {
-          pane.sessionId = null;
-        }
+        pane.sessionId = this._createSession({}).id;
       }
     }
 

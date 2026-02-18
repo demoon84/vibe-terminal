@@ -1134,6 +1134,7 @@ function queryNodeRuntimeStatus() {
   const detected = spawnSync("node", ["-v"], {
     encoding: "utf8",
     windowsHide: true,
+    env: withAugmentedPath(process.env),
   });
 
   if (detected.status !== 0) {
@@ -1268,7 +1269,7 @@ function runNodeRuntimeInstallAttempt(attempt) {
     try {
       child = spawn(attempt.command, attempt.args, {
         cwd: app.getPath("home"),
-        env: process.env,
+        env: withAugmentedPath(process.env),
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         windowsHide: true,

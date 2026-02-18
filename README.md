@@ -56,11 +56,14 @@ The app can validate/install runtime dependencies from the UI startup flow:
 - Node.js runtime
 - Agent CLIs (Codex / Claude / Gemini)
 
-Recent runtime hardening included in this branch:
+Recent hardening and layout updates included in this branch:
 
 - GUI PATH augmentation for macOS/Linux (Homebrew + user tool bins like `~/.nvm`, `~/.volta`, `~/.local/bin`)
 - Resolved npm execution path for agent auto-install (prevents `npm-not-found` in GUI launch contexts)
 - UTF-8 locale fallback in terminal sessions (prevents mojibake prompt rendering)
+- Node runtime detection/auto-install now runs with augmented PATH in GUI launch contexts
+- Default startup layout preset changed to `1x2` (from `1x4`) for faster first-use flow
+- Layout restore now recovers sessions only for visible panes and clears hidden pane session bindings
 
 ## Packaging
 
@@ -90,6 +93,11 @@ npm run check
 npm test
 npm run security:deps
 ```
+
+Layout/runtime regression tests added for this behavior:
+
+- `test/layout-manager.test.js`
+- `test/node-runtime-path-regression.test.js`
 
 ## Legacy web runtime (optional)
 

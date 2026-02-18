@@ -17,7 +17,7 @@ const PTY_DATA_FLUSH_INTERVAL_MS = 16;
 function registerIpcRoutes({ ipcMain, sessionManager, layoutStore, getMainWindow }) {
   const layoutManager = new LayoutManager({
     sessionManager,
-    defaultPresetId: PRESET_IDS.ONE_BY_FOUR,
+    defaultPresetId: PRESET_IDS.ONE_BY_TWO,
   });
   const pendingPtyDataBySessionId = new Map();
   const sessionCapabilities = new Map();

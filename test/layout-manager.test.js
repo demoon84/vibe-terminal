@@ -12,6 +12,7 @@ class MockSessionManager {
     this.seq = 0;
     this.sessions = new Map();
     this.killed = [];
+    this.recovered = [];
   }
 
   createSession() {
@@ -49,6 +50,7 @@ class MockSessionManager {
   recoverSession(snapshot) {
     const recovered = { ...snapshot, status: "running", lastActiveAt: Date.now() };
     this.sessions.set(recovered.id, recovered);
+    this.recovered.push(recovered.id);
     return recovered;
   }
 
@@ -65,6 +67,15 @@ function createManager() {
   const manager = new LayoutManager({ sessionManager });
   return { manager, sessionManager };
 }
+
+test("manager defaults to 1x2 startup preset", () => {
+  const { manager } = createManager();
+  const snapshot = manager.snapshotLayout();
+  const visible = snapshot.panes.filter((pane) => pane.state === "visible");
+
+  assert.equal(snapshot.presetId, PRESET_IDS.ONE_BY_TWO);
+  assert.equal(visible.length, 0);
+});
 
 test("preset geometry is fixed to 2x2(4) / 2x6 / 2x8 / 3x12", () => {
   assert.deepEqual(
@@ -187,4 +198,69 @@ test("restore fills visible pane count to match preset panelCount", () => {
 
   const visible = restored.layout.panes.filter((pane) => pane.state === "visible");
   assert.equal(visible.length, 8);
+});
+
+test("restore recovers only visible pane sessions and clears hidden session bindings", () => {
+  const { manager, sessionManager } = createManager();
+
+  const persisted = {
+    presetId: PRESET_IDS.ONE_BY_TWO,
+    panes: [
+      { id: "pane-a", slotIndex: 0, positionIndex: 0, state: "visible", sessionId: "session-a" },
+      { id: "pane-b", slotIndex: 1, positionIndex: 1, state: "visible", sessionId: "session-b" },
+      { id: "pane-c", slotIndex: 2, positionIndex: 2, state: "hidden", sessionId: "session-c" },
+      { id: "pane-d", slotIndex: 3, positionIndex: 3, state: "hidden", sessionId: "session-d" },
+    ],
+    sessions: [
+      {
+        id: "session-a",
+        cwd: process.cwd(),
+        shell: "mock-shell",
+        env: {},
+        cols: 80,
+        rows: 24,
+        status: "running",
+        lastActiveAt: Date.now(),
+      },
+      {
+        id: "session-b",
+        cwd: process.cwd(),
+        shell: "mock-shell",
+        env: {},
+        cols: 80,
+        rows: 24,
+        status: "running",
+        lastActiveAt: Date.now(),
+      },
+      {
+        id: "session-c",
+        cwd: process.cwd(),
+        shell: "mock-shell",
+        env: {},
+        cols: 80,
+        rows: 24,
+        status: "running",
+        lastActiveAt: Date.now(),
+      },
+      {
+        id: "session-d",
+        cwd: process.cwd(),
+        shell: "mock-shell",
+        env: {},
+        cols: 80,
+        rows: 24,
+        status: "running",
+        lastActiveAt: Date.now(),
+      },
+    ],
+  };
+
+  const restored = manager.restoreLayout(persisted);
+  assert.equal(restored.restored, true);
+  assert.deepEqual(sessionManager.recovered.sort(), ["session-a", "session-b"]);
+
+  const hiddenWithSession = restored.layout.panes.filter(
+    (pane) => pane.state === "hidden" && typeof pane.sessionId === "string" && pane.sessionId.length > 0,
+  );
+  assert.equal(hiddenWithSession.length, 0);
 });

@@ -11,7 +11,7 @@ const api = runtimeWindow.multiTerminal;
 const TerminalCtor = runtimeWindow.Terminal;
 const FitAddonCtor = runtimeWindow.FitAddon?.FitAddon;
 const TERMINAL_SCROLLBACK = 20000;
-const INITIAL_PRESET_ID = "1x4";
+const INITIAL_PRESET_ID = "1x2";
 const CTRL_C_CONFIRM_WINDOW_MS = 1200;
 const TERMINAL_FIT_DEBOUNCE_MS = 50;
 const DEFAULT_TERMINAL_FONT_FAMILY =
@@ -553,7 +553,7 @@ function withSessionById(layout) {
 
 function getPresetConfig(layout, presetId) {
   const presets = layout?.presetSpec?.presets || {};
-  return presets[presetId] || DEFAULT_PRESET_LAYOUTS[presetId] || DEFAULT_PRESET_LAYOUTS["1x4"];
+  return presets[presetId] || DEFAULT_PRESET_LAYOUTS[presetId] || DEFAULT_PRESET_LAYOUTS["1x2"];
 }
 
 function getVisiblePanes(layout) {
