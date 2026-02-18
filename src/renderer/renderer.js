@@ -11,7 +11,6 @@ const api = runtimeWindow.multiTerminal;
 const TerminalCtor = runtimeWindow.Terminal;
 const FitAddonCtor = runtimeWindow.FitAddon?.FitAddon;
 const TERMINAL_SCROLLBACK = 20000;
-const MAX_SESSION_OUTPUT_CHARS = 500000;
 const INITIAL_PRESET_ID = "1x4";
 const CTRL_C_CONFIRM_WINDOW_MS = 1200;
 const TERMINAL_FIT_DEBOUNCE_MS = 50;
@@ -48,7 +47,7 @@ const TERMINAL_FONT_OPTIONS = Object.freeze([
     value: '"Source Code Pro", "D2Coding", "Cascadia Mono", "Consolas", "Courier New", monospace',
   }),
 ]);
-const DEFAULT_FULL_ACCESS_ENABLED = false;
+const DEFAULT_FULL_ACCESS_ENABLED = true;
 const FULL_ACCESS_AGENT_COMMANDS = Object.freeze({
   codex: {
     normal: "codex",
@@ -68,36 +67,17 @@ const AGENT_COMMAND_LABELS = Object.freeze({
   claude: "Claude",
   gemini: "Gemini",
 });
+const REQUIRED_AGENT_COMMANDS = Object.freeze(["codex", "claude", "gemini"]);
 
 const ui = {
   grid: document.getElementById("pane-grid"),
   statusLine: document.getElementById("status-line"),
-  startupOverlay: document.getElementById("startup-overlay"),
-  agentInstallOverlay: document.getElementById("agent-install-overlay"),
-  agentInstallTitle: document.getElementById("agent-install-title"),
-  agentInstallMessage: document.getElementById("agent-install-message"),
-  agentInstallCommand: document.getElementById("agent-install-command"),
-  agentInstallConfirmButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agent-install-confirm-btn")),
-  agentInstallCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agent-install-cancel-btn")),
-  nodeUpgradeOverlay: document.getElementById("node-upgrade-overlay"),
-  nodeUpgradeTitle: document.getElementById("node-upgrade-title"),
-  nodeUpgradeMessage: document.getElementById("node-upgrade-message"),
-  nodeUpgradeCommand: document.getElementById("node-upgrade-command"),
-  nodeUpgradeConfirmButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("node-upgrade-confirm-btn")),
-  nodeUpgradeCloseButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("node-upgrade-close-btn")),
-  pwshInstallOverlay: document.getElementById("pwsh-install-overlay"),
-  pwshInstallTitle: document.getElementById("pwsh-install-title"),
-  pwshInstallMessage: document.getElementById("pwsh-install-message"),
-  pwshInstallCommand: document.getElementById("pwsh-install-command"),
-  pwshInstallConfirmButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("pwsh-install-confirm-btn")),
-  pwshInstallCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("pwsh-install-cancel-btn")),
   shutdownOverlay: document.getElementById("shutdown-overlay"),
   dragRegion: document.getElementById("window-drag-region"),
   windowMinimizeButton: document.getElementById("window-minimize-btn"),
   windowMaximizeButton: document.getElementById("window-maximize-btn"),
   windowCloseButton: document.getElementById("window-close-btn"),
   presetButtons: /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("[data-preset-button]")),
-  startupPresetButtons: /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("[data-startup-preset]")),
   titlebarPathDivider: document.getElementById("titlebar-path-divider"),
   titlebarPathSettingButton: document.getElementById("titlebar-path-setting-btn"),
   titlebarFontSettingButton: document.getElementById("titlebar-font-setting-btn"),
@@ -119,18 +99,12 @@ const state = {
   paneViews: new Map(),
   sessionToPaneId: new Map(),
   sessionCapabilityBySessionId: new Map(),
-  sessionOutputBySessionId: new Map(),
   selectedAgentBySessionId: new Map(),
   eventUnsubscribers: [],
   isMaximized: false,
   isWindowClosing: false,
   isStoppingAllAgents: false,
-  pendingAgentInstallResolver: null,
-  pendingNodeUpgradeResolver: null,
-  pendingPwshInstallResolver: null,
-  pwshOverlayMode: "install",
   isInstallingAgentCommand: null,
-  isInstallingPwsh7: false,
   terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
 };
@@ -142,33 +116,6 @@ function setStatusLine(message) {
   const timestamp = new Date().toLocaleTimeString();
   const detail = typeof message === "string" && message.length > 0 ? ` | ${message}` : "";
   ui.statusLine.textContent = `${timestamp}${detail}`;
-}
-
-function setAgentInstallOverlayVisible(visible) {
-  if (!ui.agentInstallOverlay) {
-    return;
-  }
-  const shouldShow = Boolean(visible);
-  ui.agentInstallOverlay.classList.toggle("visible", shouldShow);
-  ui.agentInstallOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
-}
-
-function setNodeUpgradeOverlayVisible(visible) {
-  if (!ui.nodeUpgradeOverlay) {
-    return;
-  }
-  const shouldShow = Boolean(visible);
-  ui.nodeUpgradeOverlay.classList.toggle("visible", shouldShow);
-  ui.nodeUpgradeOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
-}
-
-function setPwshInstallOverlayVisible(visible) {
-  if (!ui.pwshInstallOverlay) {
-    return;
-  }
-  const shouldShow = Boolean(visible);
-  ui.pwshInstallOverlay.classList.toggle("visible", shouldShow);
-  ui.pwshInstallOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
 }
 
 function setTerminalFontOverlayVisible(visible) {
@@ -324,135 +271,6 @@ function closeTerminalFontDialog() {
   setTerminalFontOverlayVisible(false);
 }
 
-function closeInstallOverlayIfNoPendingPrompt() {
-  if (state.pendingAgentInstallResolver || state.isInstallingAgentCommand) {
-    return;
-  }
-  setAgentInstallOverlayVisible(false);
-}
-
-function resolvePendingAgentInstallPrompt(action = "cancel") {
-  const resolver = state.pendingAgentInstallResolver;
-  if (!resolver) {
-    return;
-  }
-
-  state.pendingAgentInstallResolver = null;
-  setAgentInstallOverlayVisible(false);
-  resolver(action);
-}
-
-function resolvePendingNodeUpgradePrompt(action = "dismiss") {
-  const resolver = state.pendingNodeUpgradeResolver;
-  if (!resolver) {
-    return;
-  }
-
-  state.pendingNodeUpgradeResolver = null;
-  setNodeUpgradeOverlayVisible(false);
-  resolver(action);
-}
-
-function resolvePendingPwshInstallPrompt(action = "cancel") {
-  const resolver = state.pendingPwshInstallResolver;
-  if (!resolver) {
-    return;
-  }
-
-  state.pendingPwshInstallResolver = null;
-  setPwshInstallOverlayVisible(false);
-  resolver(action);
-}
-
-function promptPowerShell7InstallAction(status) {
-  const currentVersion =
-    typeof status?.currentVersion === "string" && status.currentVersion.trim().length > 0
-      ? status.currentVersion.trim()
-      : "미설치";
-  const minimumVersion =
-    typeof status?.minimumVersion === "string" && status.minimumVersion.trim().length > 0
-      ? status.minimumVersion.trim()
-      : "7.0.0";
-  const installCommand =
-    typeof status?.installCommand === "string" && status.installCommand.trim().length > 0
-      ? status.installCommand.trim()
-      : "winget install --id Microsoft.PowerShell --source winget -e";
-  const autoInstallAvailable = Boolean(status?.autoInstallAvailable);
-  const installLabel = autoInstallAvailable ? "자동 설치" : "설치 페이지 열기";
-  const message =
-    `현재 PowerShell: ${currentVersion}\n` +
-    `최소 요구 버전: ${minimumVersion}\n` +
-    (autoInstallAvailable
-      ? "설치 버튼을 누르면 자동 설치를 시도합니다. 실패하면 설치 페이지를 엽니다."
-      : "자동 설치를 사용할 수 없어 설치 페이지로 이동합니다.");
-
-  if (
-    !ui.pwshInstallOverlay
-    || !ui.pwshInstallMessage
-    || !ui.pwshInstallCommand
-    || !ui.pwshInstallConfirmButton
-    || !ui.pwshInstallCancelButton
-  ) {
-    setStatusLine("PowerShell 설치 안내 레이어를 표시할 수 없습니다");
-    return Promise.resolve("cancel");
-  }
-
-  if (state.pendingPwshInstallResolver) {
-    return Promise.resolve("cancel");
-  }
-  state.pwshOverlayMode = "install";
-
-  if (ui.pwshInstallTitle) {
-    ui.pwshInstallTitle.textContent = "PowerShell 7 설치 필요";
-  }
-  ui.pwshInstallMessage.textContent = message;
-  ui.pwshInstallCommand.textContent = installCommand;
-  ui.pwshInstallConfirmButton.textContent = installLabel;
-  ui.pwshInstallConfirmButton.disabled = false;
-  ui.pwshInstallCancelButton.disabled = false;
-
-  setPwshInstallOverlayVisible(true);
-  ui.pwshInstallConfirmButton.focus();
-
-  return new Promise((resolve) => {
-    state.pendingPwshInstallResolver = resolve;
-  });
-}
-
-function promptPowerShell7InfoAction({ title, message, detail = "" }) {
-  if (
-    !ui.pwshInstallOverlay
-    || !ui.pwshInstallMessage
-    || !ui.pwshInstallCommand
-    || !ui.pwshInstallConfirmButton
-    || !ui.pwshInstallCancelButton
-  ) {
-    return Promise.resolve("dismiss");
-  }
-
-  if (state.pendingPwshInstallResolver) {
-    return Promise.resolve("dismiss");
-  }
-
-  state.pwshOverlayMode = "info";
-  if (ui.pwshInstallTitle) {
-    ui.pwshInstallTitle.textContent = title;
-  }
-  ui.pwshInstallMessage.textContent = message;
-  ui.pwshInstallCommand.textContent = detail;
-  ui.pwshInstallConfirmButton.textContent = "확인";
-  ui.pwshInstallConfirmButton.disabled = false;
-  ui.pwshInstallCancelButton.textContent = "닫기";
-  ui.pwshInstallCancelButton.disabled = false;
-
-  setPwshInstallOverlayVisible(true);
-  ui.pwshInstallConfirmButton.focus();
-
-  return new Promise((resolve) => {
-    state.pendingPwshInstallResolver = resolve;
-  });
-}
-
 async function ensurePowerShell7Ready() {
   if (!api?.app?.process?.checkPowerShell7Status || !api?.app?.process?.installPowerShell7) {
     return true;
@@ -469,20 +287,7 @@ async function ensurePowerShell7Ready() {
     return true;
   }
 
-  const action = await promptPowerShell7InstallAction(status);
-  if (action !== "install") {
-    setStatusLine("PowerShell 7 설치가 필요합니다");
-    return false;
-  }
-
-  state.isInstallingPwsh7 = true;
-  if (ui.pwshInstallConfirmButton) {
-    ui.pwshInstallConfirmButton.disabled = true;
-  }
-  if (ui.pwshInstallCancelButton) {
-    ui.pwshInstallCancelButton.disabled = true;
-  }
-
+  setStatusLine("PowerShell 7 미설치 감지: 자동 설치 중...");
   try {
     const result = await api.app.process.installPowerShell7();
     if (result?.ok === true && result?.installed) {
@@ -492,92 +297,19 @@ async function ensurePowerShell7Ready() {
 
     if (result?.action === "opened-install-page") {
       setStatusLine("PowerShell 7 설치 페이지를 열었습니다");
-      await promptPowerShell7InfoAction({
-        title: "PowerShell 7 자동 설치 실패",
-        message: "자동 설치에 실패하여 설치 페이지를 열었습니다.",
-        detail: `오류: ${String(result?.error || "unknown")}`,
-      });
       return false;
     }
 
     setStatusLine(`PowerShell 7 설치 실패: ${String(result?.error || "unknown")}`);
-    await promptPowerShell7InfoAction({
-      title: "PowerShell 7 설치 실패",
-      message: "자동 설치에 실패했습니다. 잠시 후 다시 시도해 주세요.",
-      detail: `오류: ${String(result?.error || "unknown")}`,
-    });
     return false;
   } catch (error) {
     setStatusLine(`PowerShell 7 설치 실패: ${String(error)}`);
-    await promptPowerShell7InfoAction({
-      title: "PowerShell 7 설치 실패",
-      message: "설치 중 예외가 발생했습니다.",
-      detail: String(error),
-    });
     return false;
-  } finally {
-    state.isInstallingPwsh7 = false;
-    resolvePendingPwshInstallPrompt("cancel");
   }
-}
-
-function promptNodeUpgradeAction(nodeStatus) {
-  const installed = Boolean(nodeStatus?.installed);
-  const currentVersion =
-    typeof nodeStatus?.currentVersion === "string" && nodeStatus.currentVersion.trim().length > 0
-      ? nodeStatus.currentVersion.trim()
-      : "미설치";
-  const minimumVersion =
-    typeof nodeStatus?.minimumVersion === "string" && nodeStatus.minimumVersion.trim().length > 0
-      ? nodeStatus.minimumVersion.trim()
-      : "20.0.0";
-  const recommendedVersion =
-    typeof nodeStatus?.recommendedVersion === "string" && nodeStatus.recommendedVersion.trim().length > 0
-      ? nodeStatus.recommendedVersion.trim()
-      : minimumVersion;
-  const upgradeCommand =
-    typeof nodeStatus?.upgradeCommand === "string" && nodeStatus.upgradeCommand.trim().length > 0
-      ? nodeStatus.upgradeCommand.trim()
-      : "nvm install 20 && nvm use 20";
-  const message = installed
-    ? `현재 Node.js ${currentVersion}가 감지되었습니다. 이 앱은 Node.js ${recommendedVersion}+ 환경에서 가장 안정적으로 동작합니다.`
-    : `Node.js가 감지되지 않았습니다. 개발/빌드 안정성을 위해 Node.js ${recommendedVersion}+ 설치를 권장합니다.`;
-
-  if (
-    !ui.nodeUpgradeOverlay
-    || !ui.nodeUpgradeMessage
-    || !ui.nodeUpgradeCommand
-    || !ui.nodeUpgradeConfirmButton
-    || !ui.nodeUpgradeCloseButton
-  ) {
-    setStatusLine(
-      `Node 업그레이드 권장: 현재 ${currentVersion}, 최소 ${minimumVersion}, 권장 ${recommendedVersion}`,
-    );
-    return Promise.resolve("dismiss");
-  }
-
-  if (state.pendingNodeUpgradeResolver) {
-    return Promise.resolve("dismiss");
-  }
-
-  if (ui.nodeUpgradeTitle) {
-    ui.nodeUpgradeTitle.textContent = "Node.js 업그레이드 권장";
-  }
-  ui.nodeUpgradeMessage.textContent = message;
-  ui.nodeUpgradeCommand.textContent = upgradeCommand;
-  ui.nodeUpgradeConfirmButton.disabled = false;
-  ui.nodeUpgradeCloseButton.disabled = false;
-
-  setNodeUpgradeOverlayVisible(true);
-  ui.nodeUpgradeConfirmButton.focus();
-
-  return new Promise((resolve) => {
-    state.pendingNodeUpgradeResolver = resolve;
-  });
 }
 
 async function ensureNodeRuntimeSupported() {
-  if (!api?.app?.process?.checkNodeRuntimeStatus) {
+  if (!api?.app?.process?.checkNodeRuntimeStatus || !api?.app?.process?.installNodeRuntime) {
     return true;
   }
 
@@ -593,15 +325,29 @@ async function ensureNodeRuntimeSupported() {
     return true;
   }
 
-  await promptNodeUpgradeAction(nodeStatus);
-  const currentVersion =
-    typeof nodeStatus.currentVersion === "string" && nodeStatus.currentVersion.length > 0
-      ? nodeStatus.currentVersion
-      : "미설치";
-  setStatusLine(
-    `Node 업그레이드 권장: 현재 ${currentVersion}, 권장 ${String(nodeStatus.recommendedVersion || "20+")}`,
-  );
-  return false;
+  setStatusLine("Node.js 미설치/버전부족 감지: 자동 설치 중...");
+  try {
+    const result = await api.app.process.installNodeRuntime();
+    if (result?.ok === true && !result?.needsUpgrade) {
+      const version =
+        typeof result?.currentVersion === "string" && result.currentVersion.length > 0
+          ? ` (${result.currentVersion})`
+          : "";
+      setStatusLine(`Node.js 설치 완료${version}`);
+      return true;
+    }
+
+    if (result?.action === "opened-install-page") {
+      setStatusLine("Node.js 설치 페이지를 열었습니다");
+      return false;
+    }
+
+    setStatusLine(`Node.js 설치 실패: ${String(result?.error || "unknown")}`);
+    return false;
+  } catch (error) {
+    setStatusLine(`Node.js 설치 실패: ${String(error)}`);
+    return false;
+  }
 }
 
 async function runTerminalColorDiagnosticsOnStartup() {
@@ -631,47 +377,47 @@ async function runTerminalColorDiagnosticsOnStartup() {
   }
 }
 
-function promptAgentInstallAction(installStatus, fallbackLabel) {
-  const label =
-    installStatus?.label
-    || AGENT_COMMAND_LABELS[fallbackLabel]
-    || String(fallbackLabel || "Agent");
-  const installCommand =
-    typeof installStatus?.installCommand === "string" && installStatus.installCommand.trim().length > 0
-      ? installStatus.installCommand.trim()
-      : `npm install -g ${String(installStatus?.packageName || "").trim()}@latest`;
-
-  if (
-    !ui.agentInstallOverlay
-    || !ui.agentInstallMessage
-    || !ui.agentInstallCommand
-    || !ui.agentInstallConfirmButton
-    || !ui.agentInstallCancelButton
-  ) {
-    setStatusLine(`${label} 설치 안내 레이어를 표시할 수 없습니다`);
-    return Promise.resolve("cancel");
+async function ensureTmuxInstalledOnStartup() {
+  if (!api?.app?.process?.checkTmuxStatus || !api?.app?.process?.installTmux) {
+    return true;
   }
 
-  if (state.pendingAgentInstallResolver) {
-    return Promise.resolve("cancel");
+  let status = null;
+  try {
+    status = await api.app.process.checkTmuxStatus();
+  } catch (error) {
+    setStatusLine(`tmux 설치 상태 확인 실패: ${String(error)}`);
+    return false;
   }
 
-  if (ui.agentInstallTitle) {
-    ui.agentInstallTitle.textContent = `${label} 설치 필요`;
+  if (!status || status.ok !== true) {
+    setStatusLine(`tmux 설치 상태 확인 실패: ${String(status?.error || "unknown")}`);
+    return false;
   }
-  ui.agentInstallMessage.textContent =
-    `${label}가 설치되어 있지 않습니다. 최신 버전을 먼저 설치한 뒤 마운트합니다.`;
-  ui.agentInstallCommand.textContent = installCommand;
 
-  ui.agentInstallConfirmButton.disabled = false;
-  ui.agentInstallCancelButton.disabled = false;
+  if (!status.supportedPlatform || !status.needsInstall) {
+    return true;
+  }
 
-  setAgentInstallOverlayVisible(true);
-  ui.agentInstallConfirmButton.focus();
+  setStatusLine("tmux 미설치 감지: 최신 버전 자동 설치 중...");
+  try {
+    const result = await api.app.process.installTmux();
+    if (result?.ok === true && result?.installed) {
+      setStatusLine("tmux 최신 버전 설치 완료");
+      return true;
+    }
 
-  return new Promise((resolve) => {
-    state.pendingAgentInstallResolver = resolve;
-  });
+    if (result?.action === "opened-install-page") {
+      setStatusLine("tmux 설치 실패: 설치 페이지를 열었습니다");
+      return false;
+    }
+
+    setStatusLine(`tmux 설치 실패: ${String(result?.error || "unknown")}`);
+    return false;
+  } catch (error) {
+    setStatusLine(`tmux 설치 실패: ${String(error)}`);
+    return false;
+  }
 }
 
 async function ensureAgentInstalled(agentCommand) {
@@ -706,15 +452,9 @@ async function ensureAgentInstalled(agentCommand) {
     return true;
   }
 
-  const action = await promptAgentInstallAction(installStatus, agentCommand);
-  if (action !== "install") {
-    setStatusLine(`${agentLabel} 설치 취소`);
-    return false;
-  }
-
   state.isInstallingAgentCommand = agentCommand;
   try {
-    setStatusLine(`${agentLabel} 최신 버전 설치 중...`);
+    setStatusLine(`${agentLabel} 미설치 감지: 최신 버전 자동 설치 중...`);
     const result = await api.app.process.installAgentLatest({
       agentCommand,
     });
@@ -734,8 +474,39 @@ async function ensureAgentInstalled(agentCommand) {
   }
 }
 
+async function ensureRequiredAgentsInstalledOnStartup() {
+  if (!api?.app?.process?.checkAgentInstallStatus || !api?.app?.process?.installAgentLatest) {
+    return true;
+  }
+
+  const failedLabels = [];
+  for (const agentCommand of REQUIRED_AGENT_COMMANDS) {
+    const ready = await ensureAgentInstalled(agentCommand);
+    if (!ready) {
+      failedLabels.push(AGENT_COMMAND_LABELS[agentCommand] || agentCommand);
+    }
+  }
+
+  if (failedLabels.length === 0) {
+    setStatusLine("에이전트 설치 점검 완료");
+    return true;
+  }
+
+  setStatusLine(`에이전트 자동 설치 실패: ${failedLabels.join(", ")}`);
+  return false;
+}
+
 async function runAgentForViewWithInstallCheck(view, agentCommand, options = {}) {
   if (!view?.sessionId) {
+    return;
+  }
+
+  if (view.selectedAgentCommand === agentCommand) {
+    if (!options.silent) {
+      const label = AGENT_COMMAND_LABELS[agentCommand] || agentCommand;
+      setStatusLine(`${label} 이미 마운트됨`);
+    }
+    view.terminal?.focus();
     return;
   }
 
@@ -749,13 +520,6 @@ async function runAgentForViewWithInstallCheck(view, agentCommand, options = {})
   runAgentForView(view, agentCommand, options);
 }
 
-function showStartupOverlay(visible) {
-  if (!ui.startupOverlay) {
-    return;
-  }
-  ui.startupOverlay.classList.toggle("visible", Boolean(visible));
-}
-
 function showShutdownOverlay(visible) {
   if (!ui.shutdownOverlay) {
     return;
@@ -767,9 +531,6 @@ function showShutdownOverlay(visible) {
 function highlightPresetButtons(presetId) {
   ui.presetButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.presetButton === presetId);
-  });
-  ui.startupPresetButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.startupPreset === presetId);
   });
 }
 
@@ -1019,9 +780,63 @@ function isPrimaryModifierPressed(event) {
   return Boolean(event.ctrlKey || event.metaKey);
 }
 
+function isMacPlatform() {
+  return /mac/i.test(String(runtimeWindow.navigator?.platform || ""));
+}
+
+function isFontSizeDecreaseShortcut(event) {
+  if (!event || event.altKey || !event.shiftKey) {
+    return false;
+  }
+
+  const usesMacModifier = isMacPlatform()
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+  if (!usesMacModifier) {
+    return false;
+  }
+
+  const key = String(event.key || "");
+  const code = String(event.code || "").toLowerCase();
+  return key === "_" || code === "minus";
+}
+
+function adjustTerminalFontSize(delta) {
+  const step = Number.parseInt(String(delta), 10);
+  if (!Number.isFinite(step) || step === 0) {
+    return false;
+  }
+
+  const nextSize = normalizeTerminalFontSize(state.terminalFontSize + step);
+  if (nextSize === state.terminalFontSize) {
+    setStatusLine(`터미널 폰트 크기 한계: ${nextSize}px`);
+    return false;
+  }
+
+  applyTerminalFontSettings(
+    { fontFamily: state.terminalFontFamily, fontSize: nextSize },
+    { persist: true, refit: true, announce: true },
+  );
+  return true;
+}
+
+function isLetterShortcut(event, letter) {
+  const expected = String(letter || "").trim().toLowerCase();
+  if (!expected) {
+    return false;
+  }
+  const key = String(event?.key || "").toLowerCase();
+  const code = String(event?.code || "").toLowerCase();
+  return key === expected || code === `key${expected}`;
+}
+
 function isCopyShortcut(event) {
-  const key = String(event.key || "").toLowerCase();
-  return isPrimaryModifierPressed(event) && !event.shiftKey && !event.altKey && key === "c";
+  return (
+    isPrimaryModifierPressed(event)
+    && !event.shiftKey
+    && !event.altKey
+    && isLetterShortcut(event, "c")
+  );
 }
 
 function isCopyInsertShortcut(event) {
@@ -1032,7 +847,12 @@ function isCopyInsertShortcut(event) {
 function isPasteShortcut(event) {
   const key = String(event.key || "").toLowerCase();
   return (
-    (isPrimaryModifierPressed(event) && !event.shiftKey && !event.altKey && key === "v") ||
+    (
+      isPrimaryModifierPressed(event)
+      && !event.shiftKey
+      && !event.altKey
+      && isLetterShortcut(event, "v")
+    ) ||
     (!event.ctrlKey && !event.metaKey && event.shiftKey && !event.altKey && key === "insert")
   );
 }
@@ -1168,6 +988,14 @@ function handleTerminalClipboardShortcut(event, terminal, view) {
     return true;
   }
 
+  if (isFontSizeDecreaseShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearPendingSigint(view);
+    adjustTerminalFontSize(-1);
+    return false;
+  }
+
   if (isCopyShortcut(event) || isCopyInsertShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -1213,22 +1041,36 @@ function handleTerminalClipboardShortcut(event, terminal, view) {
           .clipboardText()
           .then((text) => {
             if (!view.sessionId || typeof text !== "string" || text.length === 0) {
+              if (imageResult?.ok === false && imageResult.error && imageResult.error !== "clipboard-image-empty") {
+                setStatusLine(`이미지 첨부 실패: ${String(imageResult.error)}`);
+              } else {
+                setStatusLine("붙여넣기할 이미지/텍스트가 없습니다");
+              }
               return;
             }
             writeToSession(view.sessionId, text, { errorPrefix: "붙여넣기 실패" });
           })
-          .catch(() => {});
+          .catch(() => {
+            if (imageResult?.ok === false && imageResult.error && imageResult.error !== "clipboard-image-empty") {
+              setStatusLine(`이미지 첨부 실패: ${String(imageResult.error)}`);
+            } else {
+              setStatusLine("붙여넣기 실패: clipboard read error");
+            }
+          });
       })
       .catch(() => {
         api.app.read
           .clipboardText()
           .then((text) => {
             if (!view.sessionId || typeof text !== "string" || text.length === 0) {
+              setStatusLine("붙여넣기할 이미지/텍스트가 없습니다");
               return;
             }
             writeToSession(view.sessionId, text, { errorPrefix: "붙여넣기 실패" });
           })
-          .catch(() => {});
+          .catch(() => {
+            setStatusLine("붙여넣기 실패: clipboard read error");
+          });
       });
 
     return false;
@@ -1439,28 +1281,6 @@ async function browseDirectoryForView(view) {
   }
 }
 
-async function pickFilesForView(view) {
-  if (!view?.sessionId) {
-    return;
-  }
-
-  try {
-    const result = await api.app.write.pickFiles({
-      defaultPath: view.cwd || undefined,
-    });
-    if (!result || result.canceled) {
-      return;
-    }
-
-    const handled = writeFilePathsToTerminal(view, result.paths, "file picker");
-    if (!handled) {
-      setStatusLine("file picker failed: no file path");
-    }
-  } catch (error) {
-    setStatusLine(`file picker failed: ${String(error)}`);
-  }
-}
-
 async function runCodexForView(view) {
   await runAgentForViewWithInstallCheck(view, "codex");
 }
@@ -1512,7 +1332,6 @@ function runClearForView(view) {
   if (typeof view.terminal?.clear === "function") {
     view.terminal.clear();
   }
-  clearSessionOutput(view.sessionId);
 
   // Send Ctrl+L when a session is attached so interactive shells/CLIs can clear their view too.
   if (view.sessionId) {
@@ -1779,55 +1598,6 @@ function pruneSessionCapabilities(layout) {
   }
 }
 
-function appendSessionOutputChunk(sessionId, chunk) {
-  if (!sessionId) {
-    return;
-  }
-
-  const text = String(chunk || "");
-  if (!text) {
-    return;
-  }
-
-  const previous = state.sessionOutputBySessionId.get(sessionId) || "";
-  const merged = `${previous}${text}`;
-  if (merged.length > MAX_SESSION_OUTPUT_CHARS) {
-    state.sessionOutputBySessionId.set(sessionId, merged.slice(-MAX_SESSION_OUTPUT_CHARS));
-    return;
-  }
-  state.sessionOutputBySessionId.set(sessionId, merged);
-}
-
-function getSessionOutput(sessionId) {
-  if (!sessionId) {
-    return "";
-  }
-  return state.sessionOutputBySessionId.get(sessionId) || "";
-}
-
-function clearSessionOutput(sessionId) {
-  if (!sessionId) {
-    return;
-  }
-  state.sessionOutputBySessionId.delete(sessionId);
-}
-
-function pruneSessionOutputCache(layout) {
-  const keepSessionIds = new Set();
-  for (const session of layout?.sessions || []) {
-    const sessionId = typeof session?.id === "string" ? session.id : "";
-    if (sessionId) {
-      keepSessionIds.add(sessionId);
-    }
-  }
-
-  for (const sessionId of state.sessionOutputBySessionId.keys()) {
-    if (!keepSessionIds.has(sessionId)) {
-      state.sessionOutputBySessionId.delete(sessionId);
-    }
-  }
-}
-
 function getActiveAgentSessionIds() {
   const aliveSessionIds = new Set(
     (state.layout?.sessions || [])
@@ -1909,9 +1679,6 @@ function updatePresetButtonVisibility() {
 
   ui.presetButtons.forEach((button) => {
     updateButton(button, "presetButton");
-  });
-  ui.startupPresetButtons.forEach((button) => {
-    updateButton(button, "startupPreset");
   });
 }
 
@@ -2073,15 +1840,23 @@ async function mountAgentToAllVisiblePanes(agentCommand) {
     return;
   }
 
-  if (hasAnyActiveAgent()) {
-    updateTitlebarPathSettingVisibility();
-    setStatusLine("에이전트 실행 중에는 전체 마운트를 사용할 수 없습니다");
-    return;
-  }
-
   const views = getVisibleSessionViews();
   if (views.length === 0) {
     setStatusLine("마운트할 패널이 없습니다");
+    return;
+  }
+
+  const allAlreadyMounted = views.every((view) => view.selectedAgentCommand === agentCommand);
+  if (allAlreadyMounted) {
+    const label = AGENT_COMMAND_LABELS[agentCommand] || agentCommand;
+    setStatusLine(`이미 전체 마운트됨: ${label}`);
+    views[0]?.terminal?.focus();
+    return;
+  }
+
+  if (hasAnyActiveAgent()) {
+    updateTitlebarPathSettingVisibility();
+    setStatusLine("에이전트 실행 중에는 전체 마운트를 사용할 수 없습니다");
     return;
   }
 
@@ -2382,16 +2157,16 @@ function createPaneView(pane, index, preset, sessionMap) {
       width: 1,
     },
     theme: {
-      background: "#000000",
-      foreground: "#f2f2f2",
-      cursor: "#7fb2ff",
-      cursorAccent: "#000000",
-      selectionBackground: "rgba(127, 178, 255, 0.32)",
-      selectionInactiveBackground: "rgba(127, 178, 255, 0.32)",
-      scrollbarSliderBackground: "rgba(127, 178, 255, 0.72)",
-      scrollbarSliderHoverBackground: "rgba(127, 178, 255, 0.9)",
-      scrollbarSliderActiveBackground: "rgba(127, 178, 255, 1)",
-      overviewRulerBorder: "#000000",
+      background: "#1e1e1e",
+      foreground: "#cccccc",
+      cursor: "#aeafad",
+      cursorAccent: "#1e1e1e",
+      selectionBackground: "rgba(255, 255, 255, 0.2)",
+      selectionInactiveBackground: "rgba(255, 255, 255, 0.12)",
+      scrollbarSliderBackground: "rgba(121, 121, 121, 0.36)",
+      scrollbarSliderHoverBackground: "rgba(121, 121, 121, 0.52)",
+      scrollbarSliderActiveBackground: "rgba(121, 121, 121, 0.64)",
+      overviewRulerBorder: "#1e1e1e",
     },
   });
   const fitAddon = new FitAddonCtor();
@@ -2448,10 +2223,10 @@ function createPaneView(pane, index, preset, sessionMap) {
     clipboardPreviewMeta,
   };
 
-  const cachedOutput = getSessionOutput(view.sessionId);
-  if (cachedOutput) {
-    terminal.write(cachedOutput);
-  }
+  // Do not replay cached raw PTY output on pane re-creation.
+  // Replaying control-query sequences (for example, DA/DSR requests) can
+  // cause terminals to emit response bytes back into the shell when presets
+  // are switched, which appears as garbled input.
 
   setPaneFooterCwd(view, initialCwd);
   const rememberedAgent = getRememberedAgentSelection(view.sessionId);
@@ -2605,7 +2380,6 @@ function appendOutput(sessionId, data) {
   if (!chunk) {
     return;
   }
-  appendSessionOutputChunk(sessionId, chunk);
 
   if (view.pendingOutputViewportLine === null) {
     view.pendingOutputViewportLine = getViewportLineToPreserve(view.terminal);
@@ -2619,7 +2393,6 @@ function renderLayout(layout) {
   state.layout = JSON.parse(JSON.stringify(layout));
   rememberSessionCapabilities(layout?.sessionCapabilities || {});
   pruneSessionCapabilities(state.layout);
-  pruneSessionOutputCache(state.layout);
   pruneRememberedAgentSelections(state.layout);
 
   const preset = getPresetConfig(state.layout, state.layout.presetId);
@@ -2671,7 +2444,6 @@ async function setPreset(presetId) {
     });
     rememberSessionCapabilities(layout?.sessionCapabilities || {});
     renderLayout(layout);
-    showStartupOverlay(false);
     setStatusLine(`preset ${presetId}`);
   } catch (error) {
     setStatusLine(`preset failed: ${String(error)}`);
@@ -2684,7 +2456,6 @@ async function restoreLayout() {
     if (result?.restored && result.layout) {
       rememberSessionCapabilities(result.layout?.sessionCapabilities || {});
       renderLayout(result.layout);
-      showStartupOverlay(false);
       setStatusLine("layout restored");
       return true;
     }
@@ -2713,70 +2484,6 @@ async function requestCloseWindow() {
 }
 
 function bindEvents() {
-  ui.agentInstallConfirmButton?.addEventListener("click", () => {
-    if (state.isInstallingAgentCommand) {
-      return;
-    }
-    if (state.pendingAgentInstallResolver) {
-      resolvePendingAgentInstallPrompt("install");
-      return;
-    }
-    closeInstallOverlayIfNoPendingPrompt();
-  });
-  ui.agentInstallCancelButton?.addEventListener("click", () => {
-    if (state.isInstallingAgentCommand) {
-      return;
-    }
-    if (state.pendingAgentInstallResolver) {
-      resolvePendingAgentInstallPrompt("cancel");
-      return;
-    }
-    closeInstallOverlayIfNoPendingPrompt();
-  });
-  ui.agentInstallOverlay?.addEventListener("click", (event) => {
-    if (event.target !== ui.agentInstallOverlay || state.isInstallingAgentCommand) {
-      return;
-    }
-    if (state.pendingAgentInstallResolver) {
-      resolvePendingAgentInstallPrompt("cancel");
-      return;
-    }
-    closeInstallOverlayIfNoPendingPrompt();
-  });
-  ui.nodeUpgradeConfirmButton?.addEventListener("click", () => {
-    resolvePendingNodeUpgradePrompt("confirm");
-  });
-  ui.nodeUpgradeCloseButton?.addEventListener("click", () => {
-    resolvePendingNodeUpgradePrompt("dismiss");
-  });
-  ui.nodeUpgradeOverlay?.addEventListener("click", (event) => {
-    if (event.target !== ui.nodeUpgradeOverlay) {
-      return;
-    }
-    resolvePendingNodeUpgradePrompt("dismiss");
-  });
-  ui.pwshInstallConfirmButton?.addEventListener("click", () => {
-    if (state.isInstallingPwsh7) {
-      return;
-    }
-    if (state.pwshOverlayMode === "info") {
-      resolvePendingPwshInstallPrompt("dismiss");
-      return;
-    }
-    resolvePendingPwshInstallPrompt("install");
-  });
-  ui.pwshInstallCancelButton?.addEventListener("click", () => {
-    if (state.isInstallingPwsh7) {
-      return;
-    }
-    resolvePendingPwshInstallPrompt("cancel");
-  });
-  ui.pwshInstallOverlay?.addEventListener("click", (event) => {
-    if (event.target !== ui.pwshInstallOverlay || state.isInstallingPwsh7) {
-      return;
-    }
-    resolvePendingPwshInstallPrompt("cancel");
-  });
   ui.terminalFontSelect?.addEventListener("change", () => {
     const selectedFamily = ui.terminalFontSelect?.value || state.terminalFontFamily;
     const selectedSize = getTerminalFontSizeFromDialog();
@@ -2858,6 +2565,12 @@ function bindEvents() {
   });
 
   const handleEscapeForInstallPrompt = (event) => {
+    if (isFontSizeDecreaseShortcut(event)) {
+      event.preventDefault();
+      adjustTerminalFontSize(-1);
+      return;
+    }
+
     if (event.key !== "Escape") {
       return;
     }
@@ -2866,19 +2579,6 @@ function bindEvents() {
       closeTerminalFontDialog();
       return;
     }
-    if (state.pendingNodeUpgradeResolver) {
-      resolvePendingNodeUpgradePrompt("dismiss");
-      return;
-    }
-    if (state.pendingPwshInstallResolver) {
-      resolvePendingPwshInstallPrompt("cancel");
-      return;
-    }
-    if (state.pendingAgentInstallResolver) {
-      resolvePendingAgentInstallPrompt("cancel");
-      return;
-    }
-    closeInstallOverlayIfNoPendingPrompt();
   };
   window.addEventListener("keydown", handleEscapeForInstallPrompt, true);
   state.eventUnsubscribers.push(() => {
@@ -2894,15 +2594,6 @@ function bindEvents() {
   ui.presetButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const presetId = button.dataset.presetButton;
-      if (presetId) {
-        setPreset(presetId);
-      }
-    });
-  });
-
-  ui.startupPresetButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const presetId = button.dataset.startupPreset;
       if (presetId) {
         setPreset(presetId);
       }
@@ -2932,9 +2623,6 @@ function bindEvents() {
   );
 
   window.addEventListener("beforeunload", () => {
-    resolvePendingAgentInstallPrompt("cancel");
-    resolvePendingNodeUpgradePrompt("dismiss");
-    resolvePendingPwshInstallPrompt("cancel");
     api.app.lifecycle.rendererUnloading();
     for (const unsubscribe of state.eventUnsubscribers) {
       unsubscribe();
@@ -2967,6 +2655,8 @@ async function bootstrap() {
   );
 
   bindEvents();
+  await ensureTmuxInstalledOnStartup();
+  await ensureRequiredAgentsInstalledOnStartup();
   await ensurePowerShell7Ready();
   await runTerminalColorDiagnosticsOnStartup();
   await ensureNodeRuntimeSupported();

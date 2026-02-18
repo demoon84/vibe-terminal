@@ -23,7 +23,7 @@
             alt=""
             aria-hidden="true"
           />
-          Vibe Terminal
+          <span class="titlebar-app-text">Vibe Terminal</span>
         </span>
         <div class="titlebar-preset-group">
           <button data-preset-button="1x2">2분할</button>
@@ -87,42 +87,7 @@
     </header>
 
     <main id="pane-grid" class="pane-grid"></main>
-
-    <div id="agent-install-overlay" class="agent-install-overlay" aria-hidden="true">
-      <div class="agent-install-card" role="dialog" aria-modal="true" aria-labelledby="agent-install-title">
-        <h2 id="agent-install-title">에이전트 설치 필요</h2>
-        <p id="agent-install-message" class="agent-install-message"></p>
-        <pre id="agent-install-command" class="agent-install-command"></pre>
-        <div class="agent-install-actions">
-          <button id="agent-install-cancel-btn" type="button">취소</button>
-          <button id="agent-install-confirm-btn" type="button">설치</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="node-upgrade-overlay" class="agent-install-overlay" aria-hidden="true">
-      <div class="agent-install-card" role="dialog" aria-modal="true" aria-labelledby="node-upgrade-title">
-        <h2 id="node-upgrade-title">Node.js 업그레이드 권장</h2>
-        <p id="node-upgrade-message" class="agent-install-message"></p>
-        <pre id="node-upgrade-command" class="agent-install-command"></pre>
-        <div class="agent-install-actions">
-          <button id="node-upgrade-close-btn" type="button">닫기</button>
-          <button id="node-upgrade-confirm-btn" type="button">확인</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="pwsh-install-overlay" class="agent-install-overlay" aria-hidden="true">
-      <div class="agent-install-card" role="dialog" aria-modal="true" aria-labelledby="pwsh-install-title">
-        <h2 id="pwsh-install-title">PowerShell 7 설치 필요</h2>
-        <p id="pwsh-install-message" class="agent-install-message"></p>
-        <pre id="pwsh-install-command" class="agent-install-command"></pre>
-        <div class="agent-install-actions">
-          <button id="pwsh-install-cancel-btn" type="button">닫기</button>
-          <button id="pwsh-install-confirm-btn" type="button">설치</button>
-        </div>
-      </div>
-    </div>
+    <div id="status-line" class="status-line" aria-live="polite"></div>
 
     <div id="terminal-font-overlay" class="agent-install-overlay" aria-hidden="true">
       <div class="agent-install-card terminal-font-card" role="dialog" aria-modal="true" aria-labelledby="terminal-font-title">

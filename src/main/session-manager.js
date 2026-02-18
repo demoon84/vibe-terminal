@@ -1,6 +1,11 @@
 const { EventEmitter } = require("events");
-const { execFileSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const pty = require("node-pty");
+const {
+  withAugmentedPath,
+  getKnownCommandLocations,
+  isExecutableFile,
+} = require("./path-utils");
 const {
   SESSION_STATUS,
   createId,
@@ -14,6 +19,12 @@ const MAX_RETAINED_STOPPED_SESSIONS = 128;
 const TERMINAL_COLOR_MODE = String(process.env.VIBE_TERMINAL_COLOR_MODE || "force")
   .trim()
   .toLowerCase();
+const TMUX_COMMAND_NAME = "tmux";
+const TMUX_SESSION_PREFIX = "vibe-pane-";
+const TMUX_COMMAND_TIMEOUT_MS = 10_000;
+const TMUX_HIDE_STATUS = String(process.env.VIBE_TMUX_HIDE_STATUS || "1")
+  .trim()
+  .toLowerCase() !== "0";
 
 const POWERSHELL_UTF8_BOOTSTRAP =
   "try { " +
@@ -40,56 +51,78 @@ function now() {
   return Date.now();
 }
 
-function toSafePid(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
+function trimTail(text, maxLength = 8_192) {
+  const normalized = String(text || "");
+  if (normalized.length <= maxLength) {
+    return normalized;
   }
-  return parsed;
+  return normalized.slice(normalized.length - maxLength);
 }
 
-function shouldForceTreeKill(reason) {
-  return (
-    reason === "app-before-quit" ||
-    reason === "app-will-quit" ||
-    reason === "window-close" ||
-    reason === "window-closed" ||
-    reason === "renderer-unloading" ||
-    reason === "renderer-crash"
+function parseLocatedPaths(stdout) {
+  return String(stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function resolveTmuxBinary(baseEnv = process.env) {
+  const lookupEnv = withAugmentedPath(baseEnv);
+  const locator = process.platform === "win32" ? "where" : "which";
+  const located = spawnSync(locator, [TMUX_COMMAND_NAME], {
+    encoding: "utf8",
+    env: lookupEnv,
+    windowsHide: true,
+    timeout: 3_000,
+  });
+
+  const locatedPaths = located.status === 0 ? parseLocatedPaths(located.stdout) : [];
+  const knownPaths = getKnownCommandLocations(TMUX_COMMAND_NAME).filter((candidatePath) =>
+    isExecutableFile(candidatePath)
   );
+
+  const resolvedPath = [...locatedPaths, ...knownPaths]
+    .map((entry) => entry.trim())
+    .filter((entry, index, array) => entry.length > 0 && array.indexOf(entry) === index)[0];
+
+  return resolvedPath || TMUX_COMMAND_NAME;
 }
 
-function forceKillProcessTree(pid) {
-  const safePid = toSafePid(pid);
-  if (!safePid) {
-    return false;
+function toTmuxCommandResult(result) {
+  const stdout = trimTail(result.stdout || "");
+  const stderr = trimTail(result.stderr || "");
+
+  if (result.error) {
+    return {
+      ok: false,
+      status: typeof result.status === "number" ? result.status : null,
+      stdout,
+      stderr,
+      error: String(result.error),
+    };
   }
 
-  if (process.platform === "win32") {
-    try {
-      execFileSync("taskkill", ["/PID", String(safePid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      return true;
-    } catch (_error) {
-      return false;
-    }
+  if (result.status === 0) {
+    return {
+      ok: true,
+      status: 0,
+      stdout,
+      stderr,
+      error: null,
+    };
   }
 
-  try {
-    process.kill(-safePid, "SIGKILL");
-    return true;
-  } catch (_error) {
-    // Fallback to direct pid kill when process group kill is unavailable.
-  }
+  return {
+    ok: false,
+    status: typeof result.status === "number" ? result.status : null,
+    stdout,
+    stderr,
+    error: `tmux-exit-${String(result.status)}`,
+  };
+}
 
-  try {
-    process.kill(safePid, "SIGKILL");
-    return true;
-  } catch (_error) {
-    return false;
-  }
+function isSpawnEnoentError(value) {
+  return String(value || "").toUpperCase().includes("ENOENT");
 }
 
 function isPowerShell7(shell) {
@@ -99,6 +132,30 @@ function isPowerShell7(shell) {
     normalized === "pwsh.exe" ||
     normalized.endsWith("\\pwsh.exe") ||
     normalized.endsWith("/pwsh.exe")
+  );
+}
+
+function isPowerShellShell(shell) {
+  const normalized = String(shell || "").toLowerCase();
+  return (
+    normalized === "pwsh" ||
+    normalized === "pwsh.exe" ||
+    normalized === "powershell" ||
+    normalized === "powershell.exe" ||
+    normalized.endsWith("\\pwsh.exe") ||
+    normalized.endsWith("/pwsh.exe") ||
+    normalized.endsWith("\\powershell.exe") ||
+    normalized.endsWith("/powershell.exe")
+  );
+}
+
+function isCmdShell(shell) {
+  const normalized = String(shell || "").toLowerCase();
+  return (
+    normalized === "cmd" ||
+    normalized === "cmd.exe" ||
+    normalized.endsWith("\\cmd.exe") ||
+    normalized.endsWith("/cmd.exe")
   );
 }
 
@@ -162,44 +219,6 @@ function extractCwdFromOsc7Stream(chunk) {
   return { cwd: nextCwd, remainder };
 }
 
-function resolveSpawnSpec(shell) {
-  if (process.platform === "win32" && isPowerShellShell(shell)) {
-    return {
-      command: shell,
-      args: ["-NoLogo", "-NoExit", "-Command", POWERSHELL_STARTUP_COMMAND],
-    };
-  }
-
-  return {
-    command: shell,
-    args: [],
-  };
-}
-
-function isPowerShellShell(shell) {
-  const normalized = String(shell || "").toLowerCase();
-  return (
-    normalized === "pwsh" ||
-    normalized === "pwsh.exe" ||
-    normalized === "powershell" ||
-    normalized === "powershell.exe" ||
-    normalized.endsWith("\\pwsh.exe") ||
-    normalized.endsWith("/pwsh.exe") ||
-    normalized.endsWith("\\powershell.exe") ||
-    normalized.endsWith("/powershell.exe")
-  );
-}
-
-function isCmdShell(shell) {
-  const normalized = String(shell || "").toLowerCase();
-  return (
-    normalized === "cmd" ||
-    normalized === "cmd.exe" ||
-    normalized.endsWith("\\cmd.exe") ||
-    normalized.endsWith("/cmd.exe")
-  );
-}
-
 function quotePowerShellPath(value) {
   return `'${String(value || "").replace(/'/g, "''")}'`;
 }
@@ -224,6 +243,125 @@ function buildChangeDirectoryCommand(shell, cwd) {
   return `cd ${quotePosixPath(cwd)}\r`;
 }
 
+function quotePosixShellToken(value) {
+  return `'${String(value || "").replace(/'/g, `'"'"'`)}'`;
+}
+
+function isUtf8LocaleValue(value) {
+  return /utf-?8/i.test(String(value || "").trim());
+}
+
+function getUtf8LocaleFallback() {
+  return process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+}
+
+function applyUtf8LocaleSettings(env) {
+  if (process.platform === "win32" || !env || typeof env !== "object") {
+    return;
+  }
+
+  const hasInvalidLcAll = typeof env.LC_ALL === "string"
+    && env.LC_ALL.trim().length > 0
+    && !isUtf8LocaleValue(env.LC_ALL);
+  if (!hasInvalidLcAll && [env.LC_ALL, env.LC_CTYPE, env.LANG].some((value) => isUtf8LocaleValue(value))) {
+    return;
+  }
+
+  const fallbackLocale = getUtf8LocaleFallback();
+  env.LANG = fallbackLocale;
+  env.LC_CTYPE = fallbackLocale;
+  env.LC_ALL = fallbackLocale;
+}
+
+function buildSessionCommandEnvironmentSpec(extraEnv = {}, shell = "") {
+  const assignments = {};
+  const unsets = new Set();
+
+  for (const [key, rawValue] of Object.entries(extraEnv || {})) {
+    const envKey = String(key || "").trim();
+    if (!envKey) {
+      continue;
+    }
+    assignments[envKey] = String(rawValue);
+  }
+
+  if (process.platform === "win32" && isPowerShell7(shell)) {
+    assignments.ComSpec = shell;
+    assignments.COMSPEC = shell;
+  }
+
+  if (TERMINAL_COLOR_MODE === "force") {
+    unsets.add("NO_COLOR");
+    assignments.FORCE_COLOR = "1";
+    assignments.CLICOLOR = "1";
+    assignments.CLICOLOR_FORCE = "1";
+    if (!assignments.COLORTERM) {
+      assignments.COLORTERM = process.env.COLORTERM || "truecolor";
+    }
+    if (!assignments.TERM) {
+      assignments.TERM = process.env.TERM || "xterm-256color";
+    }
+  } else if (TERMINAL_COLOR_MODE === "disable") {
+    assignments.NO_COLOR = "1";
+    unsets.add("FORCE_COLOR");
+    unsets.add("CLICOLOR_FORCE");
+  }
+
+  if (process.platform !== "win32") {
+    const localeProbe = { ...process.env, ...assignments };
+    const hasInvalidLcAll = typeof localeProbe.LC_ALL === "string"
+      && localeProbe.LC_ALL.trim().length > 0
+      && !isUtf8LocaleValue(localeProbe.LC_ALL);
+    const hasUtf8Locale = [localeProbe.LC_ALL, localeProbe.LC_CTYPE, localeProbe.LANG]
+      .some((value) => isUtf8LocaleValue(value));
+    if (hasInvalidLcAll || !hasUtf8Locale) {
+      const fallbackLocale = getUtf8LocaleFallback();
+      assignments.LANG = fallbackLocale;
+      assignments.LC_CTYPE = fallbackLocale;
+      assignments.LC_ALL = fallbackLocale;
+    }
+  }
+
+  return {
+    assignments,
+    unsets: [...unsets],
+  };
+}
+
+function buildPosixEnvironmentPrefix(extraEnv = {}, shell = "") {
+  const spec = buildSessionCommandEnvironmentSpec(extraEnv, shell);
+  const segments = [];
+
+  if (spec.unsets.length > 0) {
+    segments.push(`unset ${spec.unsets.join(" ")}`);
+  }
+
+  const assignmentSegments = Object.entries(spec.assignments).map(
+    ([key, value]) => `${key}=${quotePosixShellToken(value)}`,
+  );
+  if (assignmentSegments.length > 0) {
+    segments.push(assignmentSegments.join(" "));
+  }
+
+  return segments.join("; ");
+}
+
+function buildInitialShellCommand(shell, extraEnv = {}) {
+  const normalizedShell = String(shell || "").trim();
+  if (!normalizedShell) {
+    return null;
+  }
+
+  const envPrefix = buildPosixEnvironmentPrefix(extraEnv, normalizedShell);
+  if (process.platform === "win32" && isPowerShellShell(normalizedShell)) {
+    const command = `${quotePosixShellToken(normalizedShell)} -NoLogo -NoExit -Command ${quotePosixShellToken(POWERSHELL_STARTUP_COMMAND)}`;
+    return envPrefix ? `${envPrefix}; ${command}` : command;
+  }
+
+  const command = `exec ${quotePosixShellToken(normalizedShell)}`;
+  return envPrefix ? `${envPrefix}; ${command}` : command;
+}
+
 function setWindowsEnvVariable(env, key, value) {
   const existingKey = Object.keys(env).find(
     (candidate) => String(candidate).toLowerCase() === String(key).toLowerCase(),
@@ -242,7 +380,6 @@ function buildTerminalEnv(extraEnv = {}, shell = "") {
     setWindowsEnvVariable(merged, "ComSpec", shell);
     setWindowsEnvVariable(merged, "COMSPEC", shell);
   }
-  // `inherit` keeps user environment untouched.
   if (TERMINAL_COLOR_MODE === "force") {
     delete merged.NO_COLOR;
     merged.FORCE_COLOR = "1";
@@ -255,7 +392,14 @@ function buildTerminalEnv(extraEnv = {}, shell = "") {
     delete merged.FORCE_COLOR;
     delete merged.CLICOLOR_FORCE;
   }
+  applyUtf8LocaleSettings(merged);
   return merged;
+}
+
+function normalizeTmuxSessionName(sessionId) {
+  const rawId = String(sessionId || "");
+  const safeId = rawId.replace(/[^A-Za-z0-9_-]/g, "_") || "session";
+  return `${TMUX_SESSION_PREFIX}${safeId}`.slice(0, 96);
 }
 
 function sanitizeSession(session) {
@@ -286,9 +430,333 @@ class SessionManager extends EventEmitter {
   constructor() {
     super();
     this.sessions = new Map();
-    this.terminals = new Map();
+    this.clients = new Map();
     this.osc7Remainders = new Map();
     this.stoppedSessionOrder = [];
+    this.tmuxVersion = null;
+    this.tmuxBinary = TMUX_COMMAND_NAME;
+    this.tmuxEnv = withAugmentedPath(process.env);
+    this.refreshTmuxRuntime(this.tmuxEnv);
+  }
+
+  refreshTmuxRuntime(baseEnv = process.env) {
+    this.tmuxEnv = withAugmentedPath(baseEnv);
+    this.tmuxBinary = resolveTmuxBinary(this.tmuxEnv);
+  }
+
+  runTmuxCommand(args = [], options = {}) {
+    const env = withAugmentedPath(options.env || this.tmuxEnv || process.env);
+    const cwd = options.cwd || process.cwd();
+    const timeout = options.timeoutMs || TMUX_COMMAND_TIMEOUT_MS;
+    let tmuxBinary = this.tmuxBinary || TMUX_COMMAND_NAME;
+
+    let result = spawnSync(tmuxBinary, args, {
+      encoding: "utf8",
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      timeout,
+    });
+
+    let parsed = toTmuxCommandResult(result);
+
+    if (parsed.error && isSpawnEnoentError(parsed.error)) {
+      this.refreshTmuxRuntime(options.env || env);
+      if (this.tmuxBinary !== tmuxBinary) {
+        tmuxBinary = this.tmuxBinary || TMUX_COMMAND_NAME;
+        result = spawnSync(tmuxBinary, args, {
+          encoding: "utf8",
+          cwd,
+          env: this.tmuxEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+          timeout,
+        });
+        parsed = toTmuxCommandResult(result);
+      }
+    }
+
+    return parsed;
+  }
+
+  ensureTmuxReady() {
+    if (this.tmuxVersion) {
+      return;
+    }
+
+    const result = this.runTmuxCommand(["-V"], {
+      timeoutMs: 3_000,
+    });
+
+    if (!result.ok) {
+      const details = [result.error, result.stderr, result.stdout].filter(Boolean).join(" | ");
+      throw new Error(`tmux unavailable: ${details || "unknown"}`);
+    }
+
+    this.tmuxVersion = String(result.stdout || "").trim() || "tmux";
+  }
+
+  applyTmuxClientDisplayOptions(tmuxSessionName) {
+    if (!TMUX_HIDE_STATUS || !tmuxSessionName) {
+      return;
+    }
+
+    this.runTmuxCommand(["set-option", "-t", tmuxSessionName, "status", "off"], {
+      timeoutMs: 3_000,
+    });
+  }
+
+  hasTmuxSession(tmuxSessionName) {
+    const result = this.runTmuxCommand(["has-session", "-t", tmuxSessionName], {
+      timeoutMs: 3_000,
+    });
+    return result.ok;
+  }
+
+  killTmuxSession(tmuxSessionName) {
+    const result = this.runTmuxCommand(["kill-session", "-t", tmuxSessionName], {
+      timeoutMs: 4_000,
+    });
+
+    if (result.ok) {
+      return {
+        ok: true,
+        killed: true,
+        error: null,
+      };
+    }
+
+    const message = `${result.stderr}\n${result.stdout}`.toLowerCase();
+    if (
+      message.includes("can't find session") ||
+      message.includes("no server running") ||
+      message.includes("failed to connect to server")
+    ) {
+      return {
+        ok: true,
+        killed: false,
+        error: null,
+      };
+    }
+
+    return {
+      ok: false,
+      killed: false,
+      error: [result.error, result.stderr, result.stdout].filter(Boolean).join(" | ") || "tmux-kill-failed",
+    };
+  }
+
+  createDetachedTmuxSession(session, options = {}) {
+    const tmuxSessionName = session.tmuxSessionName;
+    const recovery = Boolean(options.recovery);
+    if (recovery && this.hasTmuxSession(tmuxSessionName)) {
+      return {
+        reusedExisting: true,
+        fallbackShell: false,
+      };
+    }
+
+    if (this.hasTmuxSession(tmuxSessionName)) {
+      this.killTmuxSession(tmuxSessionName);
+    }
+
+    const env = buildTerminalEnv(session.env, session.shell);
+    const shellCommand = buildInitialShellCommand(session.shell, session.env);
+    const baseArgs = [
+      "new-session",
+      "-d",
+      "-s",
+      tmuxSessionName,
+      "-x",
+      String(session.cols),
+      "-y",
+      String(session.rows),
+      "-c",
+      session.cwd,
+    ];
+
+    const primaryArgs = shellCommand ? [...baseArgs, shellCommand] : [...baseArgs];
+    const primaryResult = this.runTmuxCommand(primaryArgs, {
+      cwd: session.cwd,
+      env,
+    });
+
+    if (primaryResult.ok) {
+      return {
+        reusedExisting: false,
+        fallbackShell: false,
+      };
+    }
+
+    if (!shellCommand) {
+      const details = [primaryResult.error, primaryResult.stderr, primaryResult.stdout]
+        .filter(Boolean)
+        .join(" | ");
+      throw new Error(`tmux new-session failed: ${details || "unknown"}`);
+    }
+
+    const fallbackResult = this.runTmuxCommand(baseArgs, {
+      cwd: session.cwd,
+      env,
+    });
+
+    if (fallbackResult.ok) {
+      return {
+        reusedExisting: false,
+        fallbackShell: true,
+      };
+    }
+
+    const details = [
+      primaryResult.error,
+      primaryResult.stderr,
+      primaryResult.stdout,
+      fallbackResult.error,
+      fallbackResult.stderr,
+      fallbackResult.stdout,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    throw new Error(`tmux new-session failed: ${details || "unknown"}`);
+  }
+
+  disposeClientRuntime(sessionId) {
+    const runtime = this.clients.get(sessionId);
+    if (!runtime) {
+      return;
+    }
+
+    try {
+      runtime.dataSubscription?.dispose?.();
+    } catch (_error) {
+      // Best effort.
+    }
+    try {
+      runtime.exitSubscription?.dispose?.();
+    } catch (_error) {
+      // Best effort.
+    }
+
+    this.clients.delete(sessionId);
+  }
+
+  tryReattachClient(session) {
+    const currentAttempts = Number(session.reattachAttempts || 0);
+    if (currentAttempts >= 1) {
+      return false;
+    }
+
+    session.reattachAttempts = currentAttempts + 1;
+    try {
+      this.attachTmuxClient(session);
+      session.status = SESSION_STATUS.RUNNING;
+      session.lastActiveAt = now();
+      this.emit("status", sanitizeSession(session));
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  handleClientData(sessionId, data) {
+    const current = this.sessions.get(sessionId);
+    if (!current) {
+      return;
+    }
+
+    current.reattachAttempts = 0;
+    const remainder = this.osc7Remainders.get(sessionId) || "";
+    const parsed = extractCwdFromOsc7Stream(`${remainder}${data}`);
+    this.osc7Remainders.set(sessionId, parsed.remainder);
+
+    if (parsed.cwd && parsed.cwd !== current.cwd) {
+      current.cwd = parsed.cwd;
+      this.emit("status", sanitizeSession(current));
+    }
+
+    current.lastActiveAt = now();
+    this.emit("data", { sessionId, data });
+  }
+
+  handleClientExit(sessionId, exitCode, signal) {
+    this.disposeClientRuntime(sessionId);
+    this.osc7Remainders.delete(sessionId);
+
+    const current = this.sessions.get(sessionId);
+    if (!current) {
+      return;
+    }
+
+    let tmuxAlive = this.hasTmuxSession(current.tmuxSessionName);
+    if (current.status !== SESSION_STATUS.STOPPING && tmuxAlive) {
+      const reattached = this.tryReattachClient(current);
+      if (reattached) {
+        return;
+      }
+    }
+
+    if (current.status === SESSION_STATUS.STOPPING && tmuxAlive) {
+      const retryResult = this.killTmuxSession(current.tmuxSessionName);
+      if (retryResult.ok) {
+        tmuxAlive = this.hasTmuxSession(current.tmuxSessionName);
+      }
+    }
+
+    const stoppedByRoutine = current.status === SESSION_STATUS.STOPPING;
+    current.status = tmuxAlive ? SESSION_STATUS.ERRORED : SESSION_STATUS.STOPPED;
+    current.exitCode = exitCode;
+    current.signal = signal;
+    current.lastActiveAt = now();
+    if (current.status === SESSION_STATUS.ERRORED && stoppedByRoutine && tmuxAlive) {
+      current.error = "tmux-session-still-running";
+    }
+
+    this.emit("status", sanitizeSession(current));
+    this.emit("exit", {
+      sessionId,
+      exitCode,
+      signal,
+      status: current.status,
+    });
+
+    if (current.status === SESSION_STATUS.STOPPED) {
+      this.retainStoppedSession(sessionId);
+    }
+  }
+
+  attachTmuxClient(session) {
+    this.applyTmuxClientDisplayOptions(session.tmuxSessionName);
+    const env = withAugmentedPath(buildTerminalEnv(session.env, session.shell));
+    this.refreshTmuxRuntime(env);
+    const tmuxBinary = this.tmuxBinary || TMUX_COMMAND_NAME;
+
+    const client = pty.spawn(tmuxBinary, ["attach-session", "-t", session.tmuxSessionName], {
+      name: "xterm-256color",
+      cwd: session.cwd,
+      cols: session.cols,
+      rows: session.rows,
+      env: this.tmuxEnv,
+    });
+
+    const runtime = {
+      sessionId: session.id,
+      tmuxSessionName: session.tmuxSessionName,
+      client,
+      dataSubscription: null,
+      exitSubscription: null,
+    };
+
+    runtime.dataSubscription = client.onData((data) => {
+      this.handleClientData(session.id, data);
+    });
+
+    runtime.exitSubscription = client.onExit(({ exitCode, signal }) => {
+      this.handleClientExit(session.id, exitCode, signal);
+    });
+
+    this.clients.set(session.id, runtime);
+    this.osc7Remainders.set(session.id, "");
   }
 
   forgetSession(sessionId) {
@@ -301,7 +769,7 @@ class SessionManager extends EventEmitter {
   }
 
   retainStoppedSession(sessionId) {
-    if (!sessionId || this.terminals.has(sessionId)) {
+    if (!sessionId || this.clients.has(sessionId)) {
       return;
     }
 
@@ -310,7 +778,7 @@ class SessionManager extends EventEmitter {
 
     while (this.stoppedSessionOrder.length > MAX_RETAINED_STOPPED_SESSIONS) {
       const oldestId = this.stoppedSessionOrder.shift();
-      if (!oldestId || this.terminals.has(oldestId)) {
+      if (!oldestId || this.clients.has(oldestId)) {
         continue;
       }
       this.forgetSession(oldestId);
@@ -327,12 +795,11 @@ class SessionManager extends EventEmitter {
     const env = clonePlainObject(options.env || {});
     const cols = Number.isFinite(options.cols) ? Math.max(2, options.cols) : 80;
     const rows = Number.isFinite(options.rows) ? Math.max(1, options.rows) : 24;
-    /** @type {string} */
     const startingStatus = options.recovery
       ? SESSION_STATUS.RECOVERING
       : SESSION_STATUS.CREATING;
 
-    if (this.terminals.has(id)) {
+    if (this.clients.has(id)) {
       this.killSession(id, "replace-session");
     }
 
@@ -345,85 +812,36 @@ class SessionManager extends EventEmitter {
       rows,
       status: startingStatus,
       lastActiveAt: now(),
+      tmuxSessionName: normalizeTmuxSessionName(id),
+      reattachAttempts: 0,
     };
+
     this.stoppedSessionOrder = this.stoppedSessionOrder.filter((sessionId) => sessionId !== id);
     this.sessions.set(id, session);
     this.emit("status", sanitizeSession(session));
 
     try {
-      const spawnTerminal = (spec, sessionShell) =>
-        pty.spawn(spec.command, spec.args, {
-          name: "xterm-256color",
-          cwd,
-          cols,
-          rows,
-          env: buildTerminalEnv(env, sessionShell),
-        });
-
-      let terminal = null;
-      try {
-        terminal = spawnTerminal(resolveSpawnSpec(shell), shell);
-      } catch (error) {
-        if (!requestedShell || shell === defaultShell) {
-          throw error;
-        }
-        terminal = spawnTerminal(resolveSpawnSpec(defaultShell), defaultShell);
+      this.ensureTmuxReady();
+      const created = this.createDetachedTmuxSession(session, {
+        recovery: Boolean(options.recovery),
+      });
+      if (created.fallbackShell) {
         session.shell = defaultShell;
       }
 
-      this.terminals.set(id, terminal);
-      this.osc7Remainders.set(id, "");
-
-      terminal.onData((data) => {
-        const current = this.sessions.get(id);
-        if (!current) {
-          return;
-        }
-
-        const remainder = this.osc7Remainders.get(id) || "";
-        const parsed = extractCwdFromOsc7Stream(`${remainder}${data}`);
-        this.osc7Remainders.set(id, parsed.remainder);
-
-        if (parsed.cwd && parsed.cwd !== current.cwd) {
-          current.cwd = parsed.cwd;
-          this.emit("status", sanitizeSession(current));
-        }
-
-        current.lastActiveAt = now();
-        this.emit("data", { sessionId: id, data });
-      });
-
-      terminal.onExit(({ exitCode, signal }) => {
-        this.terminals.delete(id);
-        this.osc7Remainders.delete(id);
-        const current = this.sessions.get(id);
-        if (!current) {
-          return;
-        }
-
-        const stoppedByRoutine = current.status === SESSION_STATUS.STOPPING;
-        current.status = stoppedByRoutine
-          ? SESSION_STATUS.STOPPED
-          : SESSION_STATUS.ERRORED;
-        current.exitCode = exitCode;
-        current.signal = signal;
-        current.lastActiveAt = now();
-
-        this.emit("status", sanitizeSession(current));
-        this.emit("exit", {
-          sessionId: id,
-          exitCode,
-          signal,
-          status: current.status,
-        });
-        this.retainStoppedSession(id);
-      });
+      this.attachTmuxClient(session);
 
       session.status = SESSION_STATUS.RUNNING;
       session.lastActiveAt = now();
+      session.reattachAttempts = 0;
+      delete session.error;
       this.emit("status", sanitizeSession(session));
       return sanitizeSession(session);
     } catch (error) {
+      this.disposeClientRuntime(id);
+      this.osc7Remainders.delete(id);
+      this.killTmuxSession(session.tmuxSessionName);
+
       session.status = SESSION_STATUS.ERRORED;
       session.error = error instanceof Error ? error.message : String(error);
       session.lastActiveAt = now();
@@ -433,11 +851,14 @@ class SessionManager extends EventEmitter {
   }
 
   writeSession(sessionId, data) {
-    const terminal = this.terminals.get(sessionId);
-    if (!terminal) {
+    const runtime = this.clients.get(sessionId);
+    const client = runtime?.client;
+    if (!client) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
-    terminal.write(data);
+
+    client.write(data);
+
     const session = this.sessions.get(sessionId);
     if (session) {
       session.lastActiveAt = now();
@@ -446,8 +867,9 @@ class SessionManager extends EventEmitter {
   }
 
   changeDirectory(sessionId, cwd) {
-    const terminal = this.terminals.get(sessionId);
-    if (!terminal) {
+    const runtime = this.clients.get(sessionId);
+    const client = runtime?.client;
+    if (!client) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
@@ -462,7 +884,7 @@ class SessionManager extends EventEmitter {
     }
 
     const command = buildChangeDirectoryCommand(session.shell, nextCwd);
-    terminal.write(command);
+    client.write(command);
 
     session.cwd = nextCwd;
     session.lastActiveAt = now();
@@ -476,7 +898,7 @@ class SessionManager extends EventEmitter {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const terminal = this.terminals.get(sessionId);
+
     const parsedCols = Number(cols);
     const parsedRows = Number(rows);
     const fallbackCols = Number.isFinite(session.cols)
@@ -496,9 +918,27 @@ class SessionManager extends EventEmitter {
       return sanitizeSession(session);
     }
 
-    if (terminal) {
-      terminal.resize(safeCols, safeRows);
+    const runtime = this.clients.get(sessionId);
+    const client = runtime?.client;
+    if (client) {
+      client.resize(safeCols, safeRows);
     }
+
+    this.runTmuxCommand(
+      [
+        "resize-window",
+        "-t",
+        session.tmuxSessionName,
+        "-x",
+        String(safeCols),
+        "-y",
+        String(safeRows),
+      ],
+      {
+        timeoutMs: 3_000,
+      },
+    );
+
     session.cols = safeCols;
     session.rows = safeRows;
     session.lastActiveAt = now();
@@ -506,14 +946,18 @@ class SessionManager extends EventEmitter {
     return sanitizeSession(session);
   }
 
-  killSession(sessionId, reason = "manual", options = {}) {
+  killSession(sessionId, reason = "manual") {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return { killed: false, reason: "missing-session" };
     }
 
-    const terminal = this.terminals.get(sessionId);
-    if (!terminal) {
+    const runtime = this.clients.get(sessionId);
+    const client = runtime?.client;
+    const hasClient = Boolean(client);
+    const hasTmux = this.hasTmuxSession(session.tmuxSessionName);
+
+    if (!hasClient && !hasTmux) {
       session.status = SESSION_STATUS.STOPPED;
       session.lastActiveAt = now();
       this.emit("status", sanitizeSession(session));
@@ -529,33 +973,61 @@ class SessionManager extends EventEmitter {
     session.lastActiveAt = now();
     this.emit("status", sanitizeSession(session));
 
-    const forceTree =
-      Boolean(options?.forceTreeKill) || shouldForceTreeKill(reason);
-    const terminalPid = toSafePid(terminal.pid);
+    const tmuxKillResult = this.killTmuxSession(session.tmuxSessionName);
+    let clientKilled = false;
 
-    try {
-      terminal.kill();
-      if (forceTree) {
-        forceKillProcessTree(terminalPid);
+    if (hasClient) {
+      try {
+        client.kill();
+        clientKilled = true;
+      } catch (_error) {
+        clientKilled = false;
       }
-      return { killed: true, reason };
-    } catch (error) {
-      session.status = SESSION_STATUS.ERRORED;
-      session.error = error instanceof Error ? error.message : String(error);
+    }
+
+    if (!hasClient) {
+      this.osc7Remainders.delete(sessionId);
+      session.status = SESSION_STATUS.STOPPED;
+      session.exitCode = 0;
+      session.signal = 0;
       session.lastActiveAt = now();
       this.emit("status", sanitizeSession(session));
-      if (forceTree) {
-        forceKillProcessTree(terminalPid);
-      }
-      throw error;
+      this.emit("exit", {
+        sessionId,
+        exitCode: 0,
+        signal: 0,
+        status: session.status,
+      });
+      this.retainStoppedSession(sessionId);
     }
+
+    let tmuxStillAlive = this.hasTmuxSession(session.tmuxSessionName);
+    if (tmuxStillAlive) {
+      const retryResult = this.killTmuxSession(session.tmuxSessionName);
+      if (retryResult.ok) {
+        tmuxStillAlive = this.hasTmuxSession(session.tmuxSessionName);
+      }
+    }
+
+    if ((!tmuxKillResult.ok && !clientKilled) || tmuxStillAlive) {
+      session.status = SESSION_STATUS.ERRORED;
+      session.error = tmuxKillResult.error || (tmuxStillAlive ? "tmux-session-still-running" : "tmux-kill-failed");
+      session.lastActiveAt = now();
+      this.emit("status", sanitizeSession(session));
+      throw new Error(session.error);
+    }
+
+    return {
+      killed: tmuxKillResult.killed || clientKilled,
+      reason,
+    };
   }
 
-  cleanupAll(reason = "cleanup", options = {}) {
-    const ids = [...this.terminals.keys()];
+  cleanupAll(reason = "cleanup") {
+    const ids = [...this.sessions.keys()];
     for (const sessionId of ids) {
       try {
-        this.killSession(sessionId, reason, options);
+        this.killSession(sessionId, reason);
       } catch (_error) {
         // Best effort during cleanup.
       }

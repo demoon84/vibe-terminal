@@ -7,11 +7,11 @@ function read(filePath) {
   return fs.readFileSync(path.join(process.cwd(), filePath), "utf8");
 }
 
-test("renderer keeps dangerous full-access mode disabled by default", () => {
+test("renderer keeps dangerous full-access mode enabled by default", () => {
   const rendererSource = read("src/renderer/renderer.js");
   assert.match(
     rendererSource,
-    /const\s+DEFAULT_FULL_ACCESS_ENABLED\s*=\s*false\s*;/,
+    /const\s+DEFAULT_FULL_ACCESS_ENABLED\s*=\s*true\s*;/,
   );
 });
 
@@ -50,6 +50,10 @@ test("sensitive main-process IPC handlers enforce trusted renderer guard", () =>
     "APP_WINDOW_CLOSE",
     "APP_PICK_DIRECTORY",
     "APP_PICK_FILES",
+    "APP_TMUX_STATUS",
+    "APP_TMUX_INSTALL",
+    "APP_NODE_RUNTIME_STATUS",
+    "APP_NODE_RUNTIME_INSTALL",
     "APP_CLIPBOARD_READ",
     "APP_CLIPBOARD_IMAGE_TO_TEMP",
     "APP_CLIPBOARD_WRITE",

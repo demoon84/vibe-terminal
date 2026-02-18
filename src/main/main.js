@@ -11,6 +11,11 @@ const { LayoutStore } = require("./layout-store");
 const { registerIpcRoutes } = require("./ipc-router");
 const { createTrustedRendererGuard } = require("./ipc-trust");
 const {
+  withAugmentedPath,
+  getKnownCommandLocations,
+  isExecutableFile,
+} = require("./path-utils");
+const {
   validatePathDialogPayload,
   validateAgentCommandPayload,
   validateClipboardWritePayload,
@@ -18,10 +23,33 @@ const {
 
 const sessionManager = new SessionManager();
 let mainWindow = null;
-const APP_ICON_CANDIDATE_PATHS = [
-  path.join(__dirname, "..", "..", "assets", "app-icon.png"),
-  path.join(__dirname, "..", "renderer", "app-icon.png"),
-];
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
+app.on("second-instance", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+});
+
+const APP_ICON_CANDIDATE_PATHS =
+  process.platform === "darwin"
+    ? [
+        path.join(__dirname, "..", "..", "assets", "app-icon-mac.png"),
+        path.join(__dirname, "..", "..", "assets", "app-icon.png"),
+        path.join(__dirname, "..", "renderer", "app-icon.png"),
+      ]
+    : [
+        path.join(__dirname, "..", "..", "assets", "app-icon.png"),
+        path.join(__dirname, "..", "renderer", "app-icon.png"),
+      ];
 const APP_ICON_PATH =
   APP_ICON_CANDIDATE_PATHS.find(
     (candidatePath) => typeof candidatePath === "string" && fs.existsSync(candidatePath),
@@ -77,6 +105,16 @@ const AGENT_INSTALL_TARGETS = Object.freeze({
 const TERMINAL_COLOR_MODE = String(process.env.VIBE_TERMINAL_COLOR_MODE || "force")
   .trim()
   .toLowerCase();
+const TMUX_INSTALL_PAGE_URL = "https://github.com/tmux/tmux/wiki/Installing";
+const FORCE_TMUX_NOT_INSTALLED = String(process.env.VIBE_FORCE_TMUX_NOT_INSTALLED || "")
+  .trim()
+  .toLowerCase() === "1";
+const FORCE_TMUX_INSTALL_FAIL = String(process.env.VIBE_FORCE_TMUX_INSTALL_FAIL || "")
+  .trim()
+  .toLowerCase() === "1";
+const FORCE_TMUX_INSTALL_SUCCESS = String(process.env.VIBE_FORCE_TMUX_INSTALL_SUCCESS || "")
+  .trim()
+  .toLowerCase() === "1";
 const PWSH7_MIN_REQUIRED_VERSION = "7.0.0";
 const PWSH7_INSTALL_PAGE_URL = "https://aka.ms/powershell-release?tag=stable";
 const FORCE_PWSH7_INSTALL_FAIL = String(process.env.VIBE_FORCE_PWSH7_INSTALL_FAIL || "")
@@ -84,6 +122,7 @@ const FORCE_PWSH7_INSTALL_FAIL = String(process.env.VIBE_FORCE_PWSH7_INSTALL_FAI
   .toLowerCase() === "1";
 const NODE_MIN_REQUIRED_VERSION = "20.0.0";
 const NODE_RECOMMENDED_VERSION = "20.19.0";
+const NODE_INSTALL_PAGE_URL = "https://nodejs.org/en/download";
 const CLIPBOARD_RATE_LIMIT_WINDOW_MS = 10_000;
 const CLIPBOARD_RATE_LIMIT_MAX_CALLS = 40;
 let hasWindowCloseCleanupRun = false;
@@ -351,19 +390,31 @@ function queryCodexModelCatalog(timeoutMs = CODEX_MODEL_QUERY_TIMEOUT_MS) {
 }
 
 function getCommandLocations(commandName) {
-  const locator = process.platform === "win32" ? "where" : "which";
-  const located = spawnSync(locator, [commandName], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (located.status !== 0) {
+  const normalized = String(commandName || "").trim();
+  if (normalized.length === 0) {
     return [];
   }
 
-  return String(located.stdout || "")
-    .split(/\r?\n/)
+  const locator = process.platform === "win32" ? "where" : "which";
+  const located = spawnSync(locator, [normalized], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: withAugmentedPath(process.env),
+  });
+  const locatedPaths = located.status === 0
+    ? String(located.stdout || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+    : [];
+  const knownPaths = getKnownCommandLocations(normalized).filter((candidatePath) =>
+    isExecutableFile(candidatePath)
+  );
+
+  return [...locatedPaths, ...knownPaths]
     .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0)
+    .filter((line, index, array) => array.indexOf(line) === index);
 }
 
 function getAgentInstallTarget(agentCommand) {
@@ -385,8 +436,9 @@ function resolveNpmCommand() {
   const candidates =
     process.platform === "win32" ? ["npm.cmd", "npm", "npm.exe"] : ["npm"];
   for (const candidate of candidates) {
-    if (isExecutableAvailable(candidate)) {
-      return candidate;
+    const locations = getCommandLocations(candidate);
+    if (locations.length > 0) {
+      return locations[0];
     }
   }
   return null;
@@ -495,12 +547,341 @@ function compareSemver(left, right) {
 
 function buildNodeUpgradeCommand() {
   if (process.platform === "win32") {
-    return "winget install OpenJS.NodeJS.LTS";
+    return "winget install --id OpenJS.NodeJS.LTS --source winget -e";
   }
   if (process.platform === "darwin") {
     return "brew install node@20";
   }
   return "nvm install 20 && nvm use 20";
+}
+
+function canAutoInstallNodeRuntime() {
+  if (process.platform === "win32") {
+    return isExecutableAvailable("winget");
+  }
+  if (process.platform === "darwin") {
+    return isExecutableAvailable("brew");
+  }
+  return false;
+}
+
+function openNodeInstallPage() {
+  try {
+    shell.openExternal(NODE_INSTALL_PAGE_URL);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function buildTmuxInstallCommand() {
+  if (process.platform === "darwin") {
+    return "brew install tmux";
+  }
+  if (process.platform === "win32") {
+    return "winget install --id GnuWin32.Tmux --source winget -e";
+  }
+  if (process.platform === "linux") {
+    return "sudo apt-get install -y tmux";
+  }
+  return TMUX_INSTALL_PAGE_URL;
+}
+
+function canAutoInstallTmux() {
+  if (process.platform === "darwin") {
+    return isExecutableAvailable("brew");
+  }
+  if (process.platform === "win32") {
+    return isExecutableAvailable("winget");
+  }
+  return false;
+}
+
+function queryTmuxStatus() {
+  const installed = FORCE_TMUX_NOT_INSTALLED ? false : isExecutableAvailable("tmux");
+  const supportedPlatform = process.platform === "darwin" || process.platform === "win32";
+  if (installed) {
+    return {
+      ok: true,
+      supportedPlatform,
+      installed: true,
+      needsInstall: false,
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+      autoInstallAvailable: canAutoInstallTmux(),
+      reason: FORCE_TMUX_NOT_INSTALLED ? "forced-tmux-not-installed" : "compatible",
+    };
+  }
+
+  if (!supportedPlatform) {
+    return {
+      ok: true,
+      supportedPlatform: false,
+      installed: false,
+      needsInstall: false,
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+      autoInstallAvailable: false,
+      reason: "unsupported-platform",
+    };
+  }
+
+  return {
+    ok: true,
+    supportedPlatform: true,
+    installed: false,
+    needsInstall: true,
+    installCommand: buildTmuxInstallCommand(),
+    installPageUrl: TMUX_INSTALL_PAGE_URL,
+    autoInstallAvailable: canAutoInstallTmux(),
+    reason: FORCE_TMUX_NOT_INSTALLED ? "forced-tmux-not-installed" : "tmux-not-found",
+  };
+}
+
+function openTmuxInstallPage() {
+  try {
+    shell.openExternal(TMUX_INSTALL_PAGE_URL);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function buildTmuxInstallAttempts() {
+  if (process.platform === "darwin") {
+    return [
+      {
+        command: "brew",
+        args: ["install", "tmux"],
+        errorPrefix: "brew",
+      },
+    ];
+  }
+  if (process.platform === "win32") {
+    const agreementArgs = ["--accept-package-agreements", "--accept-source-agreements"];
+    return [
+      {
+        command: "winget",
+        args: [
+          "install",
+          "--id",
+          "GnuWin32.Tmux",
+          "--source",
+          "winget",
+          "-e",
+          ...agreementArgs,
+        ],
+        errorPrefix: "winget-id",
+      },
+      {
+        command: "winget",
+        args: [
+          "install",
+          "tmux",
+          "--source",
+          "winget",
+          ...agreementArgs,
+        ],
+        errorPrefix: "winget-query",
+      },
+    ];
+  }
+  return [];
+}
+
+function runTmuxInstallAttempt(attempt) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve({
+        ...payload,
+        stdout: trimTail(stdout),
+        stderr: trimTail(stderr),
+      });
+    };
+
+    let child = null;
+    try {
+      child = spawn(attempt.command, attempt.args, {
+        cwd: app.getPath("home"),
+        env: withAugmentedPath(process.env),
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({
+        ok: false,
+        error: `${attempt.errorPrefix}-spawn-failed:${String(error)}`,
+      });
+      return;
+    }
+
+    child.stdout?.on("data", (chunk) => {
+      stdout = trimTail(`${stdout}${String(chunk || "")}`);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = trimTail(`${stderr}${String(chunk || "")}`);
+    });
+
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        error: `${attempt.errorPrefix}-spawn-error:${String(error)}`,
+      });
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        finish({
+          ok: true,
+          error: null,
+        });
+        return;
+      }
+      finish({
+        ok: false,
+        error: `${attempt.errorPrefix}-exit-${String(code)}`,
+      });
+    });
+  });
+}
+
+async function installTmux() {
+  const status = queryTmuxStatus();
+  if (status.ok !== true) {
+    return {
+      ok: false,
+      error: "status-check-failed",
+    };
+  }
+
+  if (!status.supportedPlatform) {
+    const opened = openTmuxInstallPage();
+    return {
+      ok: false,
+      installed: false,
+      needsInstall: true,
+      action: opened ? "opened-install-page" : "open-install-page-failed",
+      error: "unsupported-platform",
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+    };
+  }
+
+  if (!status.needsInstall) {
+    return {
+      ok: true,
+      installed: true,
+      needsInstall: false,
+      action: "already-installed",
+    };
+  }
+
+  if (FORCE_TMUX_INSTALL_FAIL) {
+    console.info("[tmux-install] forced failure path");
+    const opened = openTmuxInstallPage();
+    return {
+      ok: false,
+      installed: false,
+      needsInstall: true,
+      action: opened ? "opened-install-page" : "open-install-page-failed",
+      error: "forced-install-failure",
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+    };
+  }
+
+  if (FORCE_TMUX_INSTALL_SUCCESS) {
+    console.info("[tmux-install] forced success path");
+    return {
+      ok: true,
+      installed: true,
+      needsInstall: false,
+      action: "forced-install-success",
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+    };
+  }
+
+  if (!status.autoInstallAvailable) {
+    const opened = openTmuxInstallPage();
+    return {
+      ok: false,
+      installed: false,
+      needsInstall: true,
+      action: opened ? "opened-install-page" : "open-install-page-failed",
+      error: process.platform === "win32" ? "winget-not-found" : "brew-not-found",
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+    };
+  }
+
+  const attempts = buildTmuxInstallAttempts();
+  let combinedStdout = "";
+  let combinedStderr = "";
+  let lastError = "install-attempt-unavailable";
+
+  for (const attempt of attempts) {
+    const result = await runTmuxInstallAttempt(attempt);
+    if (result.stdout) {
+      combinedStdout = trimTail(`${combinedStdout}${combinedStdout ? "\n" : ""}${result.stdout}`);
+    }
+    if (result.stderr) {
+      combinedStderr = trimTail(`${combinedStderr}${combinedStderr ? "\n" : ""}${result.stderr}`);
+    }
+    if (result.error) {
+      lastError = String(result.error);
+    }
+
+    const installed = isExecutableAvailable("tmux");
+    if (result.ok && installed) {
+      return {
+        ok: true,
+        installed: true,
+        needsInstall: false,
+        action: "auto-installed",
+        installCommand: buildTmuxInstallCommand(),
+        installPageUrl: TMUX_INSTALL_PAGE_URL,
+        stdout: trimTail(combinedStdout),
+        stderr: trimTail(combinedStderr),
+      };
+    }
+  }
+
+  const installed = isExecutableAvailable("tmux");
+  if (installed) {
+    return {
+      ok: true,
+      installed: true,
+      needsInstall: false,
+      action: "auto-installed",
+      installCommand: buildTmuxInstallCommand(),
+      installPageUrl: TMUX_INSTALL_PAGE_URL,
+      stdout: trimTail(combinedStdout),
+      stderr: trimTail(combinedStderr),
+    };
+  }
+
+  const opened = openTmuxInstallPage();
+  return {
+    ok: false,
+    installed: false,
+    needsInstall: true,
+    action: opened ? "opened-install-page" : "open-install-page-failed",
+    error: lastError,
+    installCommand: buildTmuxInstallCommand(),
+    installPageUrl: TMUX_INSTALL_PAGE_URL,
+    stdout: trimTail(combinedStdout),
+    stderr: trimTail(combinedStderr),
+  };
 }
 
 function getPwshExecutableName() {
@@ -746,6 +1127,8 @@ function installPowerShell7() {
 }
 
 function queryNodeRuntimeStatus() {
+  const supportedPlatform = process.platform === "win32" || process.platform === "darwin";
+  const autoInstallAvailable = canAutoInstallNodeRuntime();
   const minimumParsed = normalizeSemver(NODE_MIN_REQUIRED_VERSION);
   const recommendedParsed = normalizeSemver(NODE_RECOMMENDED_VERSION);
   const detected = spawnSync("node", ["-v"], {
@@ -756,13 +1139,17 @@ function queryNodeRuntimeStatus() {
   if (detected.status !== 0) {
     return {
       ok: true,
+      supportedPlatform,
       installed: false,
       currentVersion: null,
       minimumVersion: NODE_MIN_REQUIRED_VERSION,
       recommendedVersion: NODE_RECOMMENDED_VERSION,
-      needsUpgrade: true,
+      needsUpgrade: supportedPlatform,
       upgradeCommand: buildNodeUpgradeCommand(),
-      reason: "node-not-found",
+      installCommand: buildNodeUpgradeCommand(),
+      installPageUrl: NODE_INSTALL_PAGE_URL,
+      autoInstallAvailable,
+      reason: supportedPlatform ? "node-not-found" : "unsupported-platform",
     };
   }
 
@@ -771,29 +1158,266 @@ function queryNodeRuntimeStatus() {
   if (!currentParsed || !minimumParsed || !recommendedParsed) {
     return {
       ok: true,
+      supportedPlatform,
       installed: true,
       currentVersion: currentVersionText || null,
       minimumVersion: NODE_MIN_REQUIRED_VERSION,
       recommendedVersion: NODE_RECOMMENDED_VERSION,
       needsUpgrade: false,
       upgradeCommand: buildNodeUpgradeCommand(),
+      installCommand: buildNodeUpgradeCommand(),
+      installPageUrl: NODE_INSTALL_PAGE_URL,
+      autoInstallAvailable,
       reason: "version-parse-skipped",
     };
   }
 
   const belowMinimum = compareSemver(currentParsed, minimumParsed) < 0;
   const belowRecommended = compareSemver(currentParsed, recommendedParsed) < 0;
+  const needsUpgrade = supportedPlatform && (belowMinimum || belowRecommended);
   return {
     ok: true,
+    supportedPlatform,
     installed: true,
     currentVersion: `v${currentParsed.major}.${currentParsed.minor}.${currentParsed.patch}`,
     minimumVersion: NODE_MIN_REQUIRED_VERSION,
     recommendedVersion: NODE_RECOMMENDED_VERSION,
-    needsUpgrade: belowMinimum || belowRecommended,
+    needsUpgrade,
     belowMinimum,
     belowRecommended,
     upgradeCommand: buildNodeUpgradeCommand(),
-    reason: belowMinimum ? "below-minimum" : belowRecommended ? "below-recommended" : "compatible",
+    installCommand: buildNodeUpgradeCommand(),
+    installPageUrl: NODE_INSTALL_PAGE_URL,
+    autoInstallAvailable,
+    reason: !supportedPlatform
+      ? "unsupported-platform"
+      : belowMinimum
+        ? "below-minimum"
+        : belowRecommended
+          ? "below-recommended"
+          : "compatible",
+  };
+}
+
+function buildNodeRuntimeInstallAttempts() {
+  if (process.platform === "win32") {
+    const agreementArgs = ["--accept-package-agreements", "--accept-source-agreements"];
+    return [
+      {
+        command: "winget",
+        args: [
+          "install",
+          "--id",
+          "OpenJS.NodeJS.LTS",
+          "--source",
+          "winget",
+          "-e",
+          ...agreementArgs,
+        ],
+        errorPrefix: "winget-lts",
+      },
+      {
+        command: "winget",
+        args: [
+          "install",
+          "OpenJS.NodeJS.LTS",
+          "--source",
+          "winget",
+          ...agreementArgs,
+        ],
+        errorPrefix: "winget-query",
+      },
+    ];
+  }
+  if (process.platform === "darwin") {
+    return [
+      {
+        command: "brew",
+        args: ["install", "node@20"],
+        errorPrefix: "brew-install-node20",
+      },
+      {
+        command: "brew",
+        args: ["upgrade", "node@20"],
+        errorPrefix: "brew-upgrade-node20",
+      },
+    ];
+  }
+  return [];
+}
+
+function runNodeRuntimeInstallAttempt(attempt) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve({
+        ...payload,
+        stdout: trimTail(stdout),
+        stderr: trimTail(stderr),
+      });
+    };
+
+    let child = null;
+    try {
+      child = spawn(attempt.command, attempt.args, {
+        cwd: app.getPath("home"),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({
+        ok: false,
+        error: `${attempt.errorPrefix}-spawn-failed:${String(error)}`,
+      });
+      return;
+    }
+
+    child.stdout?.on("data", (chunk) => {
+      stdout = trimTail(`${stdout}${String(chunk || "")}`);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = trimTail(`${stderr}${String(chunk || "")}`);
+    });
+
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        error: `${attempt.errorPrefix}-spawn-error:${String(error)}`,
+      });
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        finish({
+          ok: true,
+          error: null,
+        });
+        return;
+      }
+      finish({
+        ok: false,
+        error: `${attempt.errorPrefix}-exit-${String(code)}`,
+      });
+    });
+  });
+}
+
+async function installNodeRuntime() {
+  const status = queryNodeRuntimeStatus();
+  if (status.ok !== true) {
+    return {
+      ok: false,
+      error: "status-check-failed",
+    };
+  }
+
+  if (!status.needsUpgrade) {
+    return {
+      ok: true,
+      installed: Boolean(status.installed),
+      needsUpgrade: false,
+      currentVersion: status.currentVersion || null,
+      action: "already-compatible",
+    };
+  }
+
+  if (!status.supportedPlatform) {
+    const opened = openNodeInstallPage();
+    return {
+      ok: false,
+      installed: Boolean(status.installed),
+      needsUpgrade: true,
+      currentVersion: status.currentVersion || null,
+      action: opened ? "opened-install-page" : "open-install-page-failed",
+      error: "unsupported-platform",
+      installCommand: buildNodeUpgradeCommand(),
+      installPageUrl: NODE_INSTALL_PAGE_URL,
+    };
+  }
+
+  if (!status.autoInstallAvailable) {
+    const opened = openNodeInstallPage();
+    return {
+      ok: false,
+      installed: Boolean(status.installed),
+      needsUpgrade: true,
+      currentVersion: status.currentVersion || null,
+      action: opened ? "opened-install-page" : "open-install-page-failed",
+      error: process.platform === "win32" ? "winget-not-found" : "brew-not-found",
+      installCommand: buildNodeUpgradeCommand(),
+      installPageUrl: NODE_INSTALL_PAGE_URL,
+    };
+  }
+
+  const attempts = buildNodeRuntimeInstallAttempts();
+  let combinedStdout = "";
+  let combinedStderr = "";
+  let lastError = "install-attempt-unavailable";
+
+  for (const attempt of attempts) {
+    const result = await runNodeRuntimeInstallAttempt(attempt);
+    if (result.stdout) {
+      combinedStdout = trimTail(`${combinedStdout}${combinedStdout ? "\n" : ""}${result.stdout}`);
+    }
+    if (result.stderr) {
+      combinedStderr = trimTail(`${combinedStderr}${combinedStderr ? "\n" : ""}${result.stderr}`);
+    }
+    if (result.error) {
+      lastError = String(result.error);
+    }
+
+    const nextStatus = queryNodeRuntimeStatus();
+    if (result.ok && nextStatus.ok === true && !nextStatus.needsUpgrade) {
+      return {
+        ok: true,
+        installed: Boolean(nextStatus.installed),
+        needsUpgrade: false,
+        currentVersion: nextStatus.currentVersion || null,
+        action: "auto-installed",
+        installCommand: buildNodeUpgradeCommand(),
+        installPageUrl: NODE_INSTALL_PAGE_URL,
+        stdout: trimTail(combinedStdout),
+        stderr: trimTail(combinedStderr),
+      };
+    }
+  }
+
+  const finalStatus = queryNodeRuntimeStatus();
+  if (finalStatus.ok === true && !finalStatus.needsUpgrade) {
+    return {
+      ok: true,
+      installed: Boolean(finalStatus.installed),
+      needsUpgrade: false,
+      currentVersion: finalStatus.currentVersion || null,
+      action: "auto-installed",
+      installCommand: buildNodeUpgradeCommand(),
+      installPageUrl: NODE_INSTALL_PAGE_URL,
+      stdout: trimTail(combinedStdout),
+      stderr: trimTail(combinedStderr),
+    };
+  }
+
+  const opened = openNodeInstallPage();
+  return {
+    ok: false,
+    installed: Boolean(finalStatus.installed),
+    needsUpgrade: true,
+    currentVersion: finalStatus.currentVersion || null,
+    action: opened ? "opened-install-page" : "open-install-page-failed",
+    error: lastError,
+    installCommand: buildNodeUpgradeCommand(),
+    installPageUrl: NODE_INSTALL_PAGE_URL,
+    stdout: trimTail(combinedStdout),
+    stderr: trimTail(combinedStderr),
   };
 }
 
@@ -911,7 +1535,7 @@ function installAgentLatest(agentCommand) {
     try {
       child = spawn(npmCommand, npmArgs, {
         cwd: app.getPath("home"),
-        env: process.env,
+        env: withAugmentedPath(process.env),
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
         windowsHide: true,
@@ -1295,6 +1919,23 @@ function createMainWindow() {
 
   mainWindow = new BrowserWindow(windowOptions);
   const disposeRendererHotReload = createRendererHotReload(mainWindow);
+  const { webContents } = mainWindow;
+
+  // Keep app chrome/text scale fixed and let renderer manage terminal font sizing only.
+  webContents.setZoomFactor(1);
+  webContents.setZoomLevel(0);
+  webContents
+    .setVisualZoomLevelLimits(1, 1)
+    .catch(() => {
+      // Best effort only.
+    });
+  webContents.on("zoom-changed", (event) => {
+    if (event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+    webContents.setZoomFactor(1);
+    webContents.setZoomLevel(0);
+  });
 
   mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
   mainWindow.setMenuBarVisibility(false);
@@ -1540,6 +2181,26 @@ app.whenReady().then(() => {
     return installAgentLatest(validated.value.agentCommand);
   });
 
+  ipcMain.handle(IPC_CHANNELS.APP_TMUX_STATUS, (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    return queryTmuxStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_TMUX_INSTALL, async (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    return installTmux();
+  });
+
   ipcMain.handle(IPC_CHANNELS.APP_PWSH7_STATUS, (event) => {
     if (!isTrustedRendererEvent(event)) {
       return {
@@ -1568,6 +2229,16 @@ app.whenReady().then(() => {
       };
     }
     return queryNodeRuntimeStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_NODE_RUNTIME_INSTALL, async (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    return installNodeRuntime();
   });
 
   ipcMain.handle(IPC_CHANNELS.APP_TERMINAL_COLOR_DIAGNOSTICS, (event) => {
