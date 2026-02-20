@@ -63,3 +63,23 @@ npm run electron:start
 - `src/renderer/styles.css`
 - `src/shared/ipc-channels.js`
 - `src/shared/models.js`
+
+### 2026-02-20 (post-adjustments)
+
+#### Window Controls / Layout
+
+- Kept window control buttons fully inside the titlebar by aligning control container/button height to titlebar bounds.
+- Reduced window control button height (effective 6px reduction from titlebar height) for better vertical balance.
+- Set window startup width and minimum width to `1400` to preserve titlebar usability at narrow sizes.
+
+#### AGENTS Guide
+
+- Refined `AGENTS.md` structure for readability and reduced duplication.
+- Added role-based execution rules (`executor`, `verifier`, `code-reviewer`, `debugger`, `explore`).
+- Added explicit workflow rule: when git is connected, always commit completed work to preserve history.
+
+#### Touched Files
+
+- `AGENTS.md`
+- `src/main/main.js`
+- `src/renderer/styles.css`
