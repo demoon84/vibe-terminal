@@ -10,10 +10,11 @@ const runtimeWindow = /** @type {any} */ (window);
 const api = runtimeWindow.multiTerminal;
 const TerminalCtor = runtimeWindow.Terminal;
 const FitAddonCtor = runtimeWindow.FitAddon?.FitAddon;
-const TERMINAL_SCROLLBACK = 20000;
+const TERMINAL_SCROLLBACK = 50000;
 const INITIAL_PRESET_ID = "1x2";
 const CTRL_C_CONFIRM_WINDOW_MS = 1200;
 const TERMINAL_FIT_DEBOUNCE_MS = 50;
+const TERMINAL_SNAPSHOT_MAX_LINES = 1000;
 const DEFAULT_TERMINAL_FONT_FAMILY =
   '"D2Coding", "Cascadia Mono", "Consolas", "Courier New", monospace';
 const DEFAULT_TERMINAL_FONT_SIZE = 12;
@@ -88,9 +89,8 @@ const ui = {
   terminalFontOverlay: document.getElementById("terminal-font-overlay"),
   terminalFontSelect: /** @type {HTMLSelectElement | null} */ (document.getElementById("terminal-font-select")),
   terminalFontSizeRange: /** @type {HTMLInputElement | null} */ (document.getElementById("terminal-font-size-range")),
-  terminalFontSizeInput: /** @type {HTMLInputElement | null} */ (document.getElementById("terminal-font-size-input")),
+  terminalFontSizeDisplay: /** @type {HTMLElement | null} */ (document.getElementById("terminal-font-size-display")),
   terminalFontPreview: document.getElementById("terminal-font-preview"),
-  terminalFontApplyButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("terminal-font-apply-btn")),
   terminalFontCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("terminal-font-cancel-btn")),
 };
 
@@ -99,6 +99,7 @@ const state = {
   paneViews: new Map(),
   sessionToPaneId: new Map(),
   sessionCapabilityBySessionId: new Map(),
+  sessionSnapshotBySessionId: new Map(),
   selectedAgentBySessionId: new Map(),
   eventUnsubscribers: [],
   isMaximized: false,
@@ -201,13 +202,13 @@ function syncTerminalFontSizeControls(fontSize = state.terminalFontSize) {
   if (ui.terminalFontSizeRange) {
     ui.terminalFontSizeRange.value = String(normalized);
   }
-  if (ui.terminalFontSizeInput) {
-    ui.terminalFontSizeInput.value = String(normalized);
+  if (ui.terminalFontSizeDisplay) {
+    ui.terminalFontSizeDisplay.textContent = String(normalized);
   }
 }
 
 function getTerminalFontSizeFromDialog() {
-  const preferred = ui.terminalFontSizeInput?.value || ui.terminalFontSizeRange?.value || state.terminalFontSize;
+  const preferred = ui.terminalFontSizeRange?.value || state.terminalFontSize;
   return normalizeTerminalFontSize(preferred);
 }
 
@@ -243,9 +244,22 @@ function applyTerminalFontSettings(settings = {}, options = {}) {
   }
 
   for (const view of state.paneViews.values()) {
-    if (view?.terminal?.options) {
+    if (view?.terminal) {
+      // In xterm 5+, options must sometimes be set this way or trigger a full layout change. 
+      // Some versions need a clear refresh to apply font family changes on the canvas.
       view.terminal.options.fontFamily = normalizedFamily;
       view.terminal.options.fontSize = normalizedSize;
+
+      try {
+        // Force xterm to re-evaluate character metrics and redraw the entire canvas
+        if (typeof view.terminal.clearTextureAtlas === 'function') {
+          view.terminal.clearTextureAtlas();
+        }
+        view.terminal.refresh(0, view.terminal.rows - 1);
+      } catch (e) {
+        // Ignore
+      }
+
       if (refit) {
         scheduleFitAndResize(view);
       }
@@ -377,48 +391,7 @@ async function runTerminalColorDiagnosticsOnStartup() {
   }
 }
 
-async function ensureTmuxInstalledOnStartup() {
-  if (!api?.app?.process?.checkTmuxStatus || !api?.app?.process?.installTmux) {
-    return true;
-  }
 
-  let status = null;
-  try {
-    status = await api.app.process.checkTmuxStatus();
-  } catch (error) {
-    setStatusLine(`tmux 설치 상태 확인 실패: ${String(error)}`);
-    return false;
-  }
-
-  if (!status || status.ok !== true) {
-    setStatusLine(`tmux 설치 상태 확인 실패: ${String(status?.error || "unknown")}`);
-    return false;
-  }
-
-  if (!status.supportedPlatform || !status.needsInstall) {
-    return true;
-  }
-
-  setStatusLine("tmux 미설치 감지: 최신 버전 자동 설치 중...");
-  try {
-    const result = await api.app.process.installTmux();
-    if (result?.ok === true && result?.installed) {
-      setStatusLine("tmux 최신 버전 설치 완료");
-      return true;
-    }
-
-    if (result?.action === "opened-install-page") {
-      setStatusLine("tmux 설치 실패: 설치 페이지를 열었습니다");
-      return false;
-    }
-
-    setStatusLine(`tmux 설치 실패: ${String(result?.error || "unknown")}`);
-    return false;
-  } catch (error) {
-    setStatusLine(`tmux 설치 실패: ${String(error)}`);
-    return false;
-  }
-}
 
 async function ensureAgentInstalled(agentCommand) {
   if (!isAgentCommand(agentCommand)) {
@@ -614,8 +587,78 @@ function updateViewCwd(view, cwd) {
   setPaneFooterCwd(view, trimmed);
 }
 
+function captureTerminalSnapshotText(terminal, maxLines = TERMINAL_SNAPSHOT_MAX_LINES) {
+  const activeBuffer = terminal?.buffer?.active;
+  if (!activeBuffer || typeof activeBuffer.getLine !== "function") {
+    return "";
+  }
+
+  const totalLines = Number(activeBuffer.length);
+  if (!Number.isFinite(totalLines) || totalLines <= 0) {
+    return "";
+  }
+
+  const boundedMaxLines = Number.isFinite(maxLines)
+    ? Math.max(1, Math.min(20000, Math.floor(maxLines)))
+    : TERMINAL_SNAPSHOT_MAX_LINES;
+  const startLine = Math.max(0, totalLines - boundedMaxLines);
+
+  let snapshot = "";
+  let hasWrittenLine = false;
+  for (let lineIndex = startLine; lineIndex < totalLines; lineIndex += 1) {
+    const line = activeBuffer.getLine(lineIndex);
+    if (!line) {
+      continue;
+    }
+
+    const text = line.translateToString(true);
+    const isWrapped = Boolean(line.isWrapped);
+    if (!hasWrittenLine) {
+      snapshot = text;
+      hasWrittenLine = true;
+      continue;
+    }
+
+    if (!isWrapped) {
+      snapshot += "\r\n";
+    }
+    snapshot += text;
+  }
+
+  return snapshot;
+}
+
+function rememberPaneSnapshot(view) {
+  if (!view?.sessionId) {
+    return;
+  }
+
+  const snapshot = captureTerminalSnapshotText(view.terminal, TERMINAL_SNAPSHOT_MAX_LINES);
+  if (!snapshot) {
+    return;
+  }
+  state.sessionSnapshotBySessionId.set(view.sessionId, snapshot);
+}
+
+function restorePaneSnapshot(view) {
+  if (!view?.sessionId || !view?.terminal) {
+    return;
+  }
+  const snapshot = state.sessionSnapshotBySessionId.get(view.sessionId);
+  if (!snapshot) {
+    return;
+  }
+
+  try {
+    view.terminal.write(snapshot);
+  } catch (_error) {
+    // Ignore snapshot restore failures during terminal initialization races.
+  }
+}
+
 function clearPaneViews() {
   for (const view of state.paneViews.values()) {
+    rememberPaneSnapshot(view);
     if (view.resizeObserver) {
       view.resizeObserver.disconnect();
     }
@@ -635,6 +678,9 @@ function clearPaneViews() {
       view.pendingOutputChunks.length = 0;
     }
     view.pendingOutputViewportLine = null;
+    if (view.terminalHost && typeof view.handleWheelCapture === "function") {
+      view.terminalHost.removeEventListener("wheel", view.handleWheelCapture, true);
+    }
     view.terminal?.dispose();
   }
   state.paneViews.clear();
@@ -818,6 +864,56 @@ function adjustTerminalFontSize(delta) {
     { persist: true, refit: true, announce: true },
   );
   return true;
+}
+
+function getTerminalMouseTrackingMode(terminal) {
+  const mode = String(terminal?.modes?.mouseTrackingMode || "none").trim().toLowerCase();
+  return mode || "none";
+}
+
+function hasTerminalScrollbackHistory(terminal) {
+  const baseY = Number(terminal?.buffer?.active?.baseY);
+  return Number.isFinite(baseY) && baseY > 0;
+}
+
+function shouldConsumeWheelWithoutInputForwarding(terminal) {
+  if (getTerminalMouseTrackingMode(terminal) !== "none") {
+    return false;
+  }
+
+  const activeBufferType = String(terminal?.buffer?.active?.type || "normal").toLowerCase();
+  const scrollback = Number(terminal?.options?.scrollback);
+  const scrollbackEnabled = Number.isFinite(scrollback) ? scrollback > 0 : true;
+  const hasScrollbackCapability =
+    activeBufferType !== "alternate"
+    && scrollbackEnabled
+    && hasTerminalScrollbackHistory(terminal);
+  return !hasScrollbackCapability;
+}
+
+function handleTerminalWheelScroll(event, terminal) {
+  if (!event || !terminal) {
+    return true;
+  }
+
+  // Keep native xterm scrolling when scrollback exists.
+  // Only consume wheel when xterm would otherwise translate it to Up/Down input.
+  if (shouldConsumeWheelWithoutInputForwarding(terminal)) {
+    event.preventDefault();
+    return false;
+  }
+  return true;
+}
+
+function handleTerminalHostWheelCapture(event, terminal, view) {
+  const handled = handleTerminalWheelScroll(event, terminal);
+  if (handled === false) {
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    }
+  }
+  return handled;
 }
 
 function isLetterShortcut(event, letter) {
@@ -1293,20 +1389,36 @@ async function runGeminiForView(view) {
   await runAgentForViewWithInstallCheck(view, "gemini");
 }
 
-function getAgentLaunchCommand(agentCommand, fullAccessEnabled) {
+async function getAgentLaunchCommand(agentCommand, fullAccessEnabled) {
   const config = FULL_ACCESS_AGENT_COMMANDS[agentCommand];
   if (!config) {
     return null;
   }
-  return fullAccessEnabled ? config.fullAccess : config.normal;
+  let cmd = fullAccessEnabled ? config.fullAccess : config.normal;
+
+  if (api?.app?.process?.readAgentsPolicy) {
+    try {
+      const result = await api.app.process.readAgentsPolicy();
+      if (result?.ok && result.content) {
+        // Remove line breaks for safer bash injection
+        const policyText = result.content.replace(/\r?\n/g, " ").trim();
+        if (policyText) {
+          cmd += ` -p "${policyText}"`;
+        }
+      }
+    } catch (_error) {
+      // Silently ignore policy read errors
+    }
+  }
+  return cmd;
 }
 
-function runAgentForView(view, agentCommand, options = {}) {
+async function runAgentForView(view, agentCommand, options = {}) {
   if (!view?.sessionId) {
     return;
   }
 
-  const command = getAgentLaunchCommand(
+  const command = await getAgentLaunchCommand(
     agentCommand,
     Boolean(view.fullAccessEnabled),
   );
@@ -1597,6 +1709,24 @@ function pruneSessionCapabilities(layout) {
     }
   }
 }
+
+function pruneSessionSnapshots(layout) {
+  const keepSessionIds = new Set();
+  for (const session of layout?.sessions || []) {
+    const sessionId = typeof session?.id === "string" ? session.id : "";
+    if (sessionId) {
+      keepSessionIds.add(sessionId);
+    }
+  }
+
+  for (const sessionId of state.sessionSnapshotBySessionId.keys()) {
+    if (!keepSessionIds.has(sessionId)) {
+      state.sessionSnapshotBySessionId.delete(sessionId);
+    }
+  }
+}
+
+
 
 function getActiveAgentSessionIds() {
   const aliveSessionIds = new Set(
@@ -2031,6 +2161,90 @@ function setAgentCommandSelection(view, command) {
   updateTitlebarPathSettingVisibility();
 }
 
+const EDITOR_ICONS = {
+  finder: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#007AFF"/><path d="M4 6.5C4 6.5 5 7 6 7C7 7 8 6.5 8 6.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 5.5v2" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M12.5 5.5v2" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M4.5 10c1 1.5 6 1.5 7 0" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  terminal: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1e1e1e"/><rect x="0.5" y="0.5" width="15" height="15" rx="3.5" stroke="#7e7e7e"/><path d="M4 5L7 8L4 11" stroke="#4AF626" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 11H12" stroke="#4AF626" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  vscode: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11 2L4 7L11 12V2Z" fill="#0066b8"/><path d="M4 7l7 5-2.5 3L2 11l2-4z" fill="#007acc"/><path d="M11 2L4 7 2 5l6.5-4L11 2z" fill="#1f9ae0"/><path d="M11 2v10l3-2.5V4.5L11 2z" fill="#24292e"/></svg>',
+  cursor: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1e1e1e"/><path d="M11 11L6 11V6" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 11L5 5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  idea: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#000000"/><rect x="2" y="2" width="12" height="12" fill="url(#paint0_linear)"/><path d="M5 11H7V5H5V11ZM9 11H11V8H9V11ZM9 6.5H11V5H9V6.5Z" fill="white"/><defs><linearGradient id="paint0_linear" x1="2" y1="2" x2="14" y2="14" gradientUnits="userSpaceOnUse"><stop stop-color="#FE2857"/><stop offset="1" stop-color="#05C9F9"/></linearGradient></defs></svg>',
+  xcode: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1c75db"/><path d="M4 12l2.5-8L12 12M5.5 8.5h5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  fallback: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#555555"/><path d="M8 4L4 12h8L8 4z" fill="white"/></svg>',
+};
+
+let cachedEditorList = null;
+
+async function populateEditorMenu(view) {
+  if (!view.editorMenu || !view.openButtonIcon || !view.openButtonText) {
+    return;
+  }
+
+  const renderItems = (items) => {
+    view.editorMenu.innerHTML = '<div class="pane-editor-menu-header">Open in</div>';
+
+    // Always pre-select the first item (usually cursor or vscode) for the main button
+    if (items.length > 0 && !view.selectedEditorId) {
+      view.selectedEditorId = items[0].id;
+      view.openButtonText.textContent = items[0].name;
+      if (items[0].icon) {
+        view.openButtonIcon.innerHTML = `<img src="${items[0].icon}" alt="" style="width: 100%; height: 100%; object-fit: contain; border-radius: 3px;" />`;
+      } else {
+        view.openButtonIcon.innerHTML = EDITOR_ICONS[items[0].id] || EDITOR_ICONS.fallback;
+      }
+    }
+
+    for (const editor of items) {
+      const itemBtn = document.createElement("button");
+      itemBtn.className = "pane-editor-menu-item";
+
+      const iconSpan = document.createElement("span");
+      iconSpan.className = "pane-editor-menu-icon";
+      if (editor.icon) {
+        iconSpan.innerHTML = `<img src="${editor.icon}" alt="" style="width: 100%; height: 100%; object-fit: contain; border-radius: 3px;" />`;
+      } else {
+        iconSpan.innerHTML = EDITOR_ICONS[editor.id] || EDITOR_ICONS.fallback;
+      }
+
+      const labelSpan = document.createElement("span");
+      labelSpan.textContent = editor.name;
+
+      itemBtn.appendChild(iconSpan);
+      itemBtn.appendChild(labelSpan);
+
+      itemBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        view.selectedEditorId = editor.id;
+        view.openButtonText.textContent = editor.name;
+        if (editor.icon) {
+          view.openButtonIcon.innerHTML = `<img src="${editor.icon}" alt="" style="width: 100%; height: 100%; object-fit: contain; border-radius: 3px;" />`;
+        } else {
+          view.openButtonIcon.innerHTML = EDITOR_ICONS[editor.id] || EDITOR_ICONS.fallback;
+        }
+        view.editorMenu.classList.remove("is-open");
+      });
+
+      view.editorMenu.appendChild(itemBtn);
+    }
+  };
+
+  if (cachedEditorList) {
+    renderItems(cachedEditorList);
+    return;
+  }
+
+  if (!api?.app?.process?.queryEditors) {
+    return;
+  }
+  try {
+    const result = await api.app.process.queryEditors();
+    if (result?.ok && Array.isArray(result.editors)) {
+      cachedEditorList = result.editors;
+      renderItems(cachedEditorList);
+    }
+  } catch (_error) {
+    // Silently ignore.
+  }
+}
+
 function createPaneView(pane, index, preset, sessionMap) {
   const session = pane.sessionId ? sessionMap.get(pane.sessionId) : null;
   const initialCwd = typeof session?.cwd === "string" ? session.cwd.trim() : "";
@@ -2097,6 +2311,34 @@ function createPaneView(pane, index, preset, sessionMap) {
   fullAccessButton.textContent = "모든권한";
   fullAccessButton.setAttribute("aria-pressed", "false");
 
+  const editorGroup = document.createElement("div");
+  editorGroup.className = "pane-editor-group";
+
+  const openButton = document.createElement("button");
+  openButton.type = "button";
+  openButton.className = "pane-open-btn";
+
+  const openButtonIcon = document.createElement("span");
+  openButtonIcon.className = "pane-open-icon";
+  openButtonIcon.innerHTML = EDITOR_ICONS.fallback;
+
+  const openButtonText = document.createElement("span");
+  openButtonText.textContent = "Open";
+
+  const openButtonChevron = document.createElement("span");
+  openButtonChevron.className = "pane-open-chevron";
+  openButtonChevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>';
+
+  openButton.appendChild(openButtonIcon);
+  openButton.appendChild(openButtonText);
+  openButton.appendChild(openButtonChevron);
+
+  const editorMenu = document.createElement("div");
+  editorMenu.className = "pane-editor-menu";
+
+  editorGroup.appendChild(openButton);
+  editorGroup.appendChild(editorMenu);
+
   const terminalHost = document.createElement("div");
   terminalHost.className = "terminal-host";
 
@@ -2131,6 +2373,7 @@ function createPaneView(pane, index, preset, sessionMap) {
   actionsLeft.appendChild(codexButton);
   actionsLeft.appendChild(claudeButton);
   actionsLeft.appendChild(geminiButton);
+  actionsRight.appendChild(editorGroup);
   actionsRight.appendChild(fullAccessButton);
   actionsRight.appendChild(clearButton);
   actionsRight.appendChild(browseButton);
@@ -2172,18 +2415,6 @@ function createPaneView(pane, index, preset, sessionMap) {
   const fitAddon = new FitAddonCtor();
   terminal.loadAddon(fitAddon);
   terminal.open(terminalHost);
-  terminal.attachCustomKeyEventHandler((event) =>
-    handleTerminalClipboardShortcut(event, terminal, view),
-  );
-  terminal.onData((data) => {
-    if (!pane.sessionId) {
-      return;
-    }
-    if (shouldHideClipboardPreviewByInput(data)) {
-      hideClipboardPreview(view);
-    }
-    writeToSession(pane.sessionId, data, { silent: true });
-  });
 
   const view = {
     root,
@@ -2205,6 +2436,12 @@ function createPaneView(pane, index, preset, sessionMap) {
     claudeButton,
     geminiButton,
     fullAccessButton,
+    editorGroup,
+    openButton,
+    openButtonIcon,
+    openButtonText,
+    editorMenu,
+    selectedEditorId: null,
     fullAccessEnabled: DEFAULT_FULL_ACCESS_ENABLED,
     isApplyingFullAccess: false,
     selectedAgentCommand: null,
@@ -2214,6 +2451,7 @@ function createPaneView(pane, index, preset, sessionMap) {
     outputFlushRafId: null,
     pendingOutputChunks: [],
     pendingOutputViewportLine: null,
+    handleWheelCapture: null,
     lastRequestedResize: null,
     pendingSigintExpiresAt: 0,
     pendingSigintTimer: null,
@@ -2222,6 +2460,26 @@ function createPaneView(pane, index, preset, sessionMap) {
     clipboardPreviewName,
     clipboardPreviewMeta,
   };
+
+  restorePaneSnapshot(view);
+
+  const handleWheelCapture = (event) =>
+    handleTerminalHostWheelCapture(event, terminal, view);
+  view.handleWheelCapture = handleWheelCapture;
+  terminalHost.addEventListener("wheel", handleWheelCapture, { capture: true, passive: false });
+  terminal.attachCustomKeyEventHandler((event) =>
+    handleTerminalClipboardShortcut(event, terminal, view),
+  );
+  terminal.attachCustomWheelEventHandler((event) => handleTerminalWheelScroll(event, terminal));
+  terminal.onData((data) => {
+    if (!pane.sessionId) {
+      return;
+    }
+    if (shouldHideClipboardPreviewByInput(data)) {
+      hideClipboardPreview(view);
+    }
+    writeToSession(pane.sessionId, data, { silent: true });
+  });
 
   // Do not replay cached raw PTY output on pane re-creation.
   // Replaying control-query sequences (for example, DA/DSR requests) can
@@ -2237,6 +2495,50 @@ function createPaneView(pane, index, preset, sessionMap) {
     event.stopPropagation();
     await browseDirectoryForView(view);
   });
+  openButton.addEventListener("click", async (event) => {
+    event.stopPropagation();
+
+    // Toggle menu if clicking the chevron area, otherwise open directly
+    const rect = openButton.getBoundingClientRect();
+    const isChevronClick = event.clientX >= rect.right - 24;
+
+    if (isChevronClick) {
+      editorMenu.classList.toggle("is-open");
+      return;
+    }
+
+    editorMenu.classList.remove("is-open");
+
+    const editorId = view.selectedEditorId;
+    if (!editorId) {
+      setStatusLine("에디터 목록을 먼저 불러와주세요");
+      return;
+    }
+    const cwd = view.cwd || process.cwd?.() || "";
+    if (!api?.app?.process?.openInEditor) {
+      setStatusLine("열기 기능을 사용할 수 없습니다");
+      return;
+    }
+    try {
+      const result = await api.app.process.openInEditor({ editorId, cwd });
+      if (result?.ok) {
+        setStatusLine(`${view.openButtonText.textContent}에서 열기 완료`);
+      } else {
+        setStatusLine(`열기 실패: ${String(result?.error || "unknown")}`);
+      }
+    } catch (error) {
+      setStatusLine(`열기 실패: ${String(error)}`);
+    }
+  });
+
+  // Close menu when clicking outside
+  document.addEventListener("click", (event) => {
+    if (!editorGroup.contains(event.target)) {
+      editorMenu.classList.remove("is-open");
+    }
+  });
+
+  populateEditorMenu(view);
   codexButton.addEventListener("click", async (event) => {
     event.stopPropagation();
     await runCodexForView(view);
@@ -2393,6 +2695,7 @@ function renderLayout(layout) {
   state.layout = JSON.parse(JSON.stringify(layout));
   rememberSessionCapabilities(layout?.sessionCapabilities || {});
   pruneSessionCapabilities(state.layout);
+  pruneSessionSnapshots(state.layout);
   pruneRememberedAgentSelections(state.layout);
 
   const preset = getPresetConfig(state.layout, state.layout.presetId);
@@ -2484,31 +2787,15 @@ async function requestCloseWindow() {
 }
 
 function bindEvents() {
-  ui.terminalFontSelect?.addEventListener("change", () => {
-    const selectedFamily = ui.terminalFontSelect?.value || state.terminalFontFamily;
-    const selectedSize = getTerminalFontSizeFromDialog();
-    updateTerminalFontPreview(selectedFamily, selectedSize);
-  });
   ui.terminalFontSizeRange?.addEventListener("input", () => {
     const selectedSize = normalizeTerminalFontSize(ui.terminalFontSizeRange?.value);
     syncTerminalFontSizeControls(selectedSize);
-    const selectedFamily = ui.terminalFontSelect?.value || state.terminalFontFamily;
-    updateTerminalFontPreview(selectedFamily, selectedSize);
+    updateTerminalFontPreview(state.terminalFontFamily, selectedSize);
+    applyTerminalFontSettings({ fontFamily: state.terminalFontFamily, fontSize: selectedSize }, { persist: false, announce: false });
   });
-  ui.terminalFontSizeInput?.addEventListener("change", () => {
-    const selectedSize = normalizeTerminalFontSize(ui.terminalFontSizeInput?.value);
-    syncTerminalFontSizeControls(selectedSize);
-    const selectedFamily = ui.terminalFontSelect?.value || state.terminalFontFamily;
-    updateTerminalFontPreview(selectedFamily, selectedSize);
-  });
-  ui.terminalFontApplyButton?.addEventListener("click", () => {
-    const selectedFamily = ui.terminalFontSelect?.value || state.terminalFontFamily;
-    const selectedSize = getTerminalFontSizeFromDialog();
-    applyTerminalFontSettings(
-      { fontFamily: selectedFamily, fontSize: selectedSize },
-      { persist: true, refit: true, announce: true },
-    );
-    closeTerminalFontDialog();
+  ui.terminalFontSizeRange?.addEventListener("change", () => {
+    const selectedSize = normalizeTerminalFontSize(ui.terminalFontSizeRange?.value);
+    applyTerminalFontSettings({ fontFamily: state.terminalFontFamily, fontSize: selectedSize }, { persist: true, refit: true, announce: true });
   });
   ui.terminalFontCancelButton?.addEventListener("click", () => {
     closeTerminalFontDialog();
@@ -2655,7 +2942,6 @@ async function bootstrap() {
   );
 
   bindEvents();
-  await ensureTmuxInstalledOnStartup();
   await ensureRequiredAgentsInstalledOnStartup();
   await ensurePowerShell7Ready();
   await runTerminalColorDiagnosticsOnStartup();

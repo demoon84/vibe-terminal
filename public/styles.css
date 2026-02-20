@@ -237,12 +237,27 @@ textarea {
 .terminal-host .xterm-viewport {
   overflow-y: auto !important;
   overscroll-behavior: contain;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(121, 121, 121, 0.62) #050d18;
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  width: 10px;
+  height: 10px;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-track {
+  background: #050d18;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(121, 121, 121, 0.56);
+  border: 2px solid #050d18;
+  border-radius: 999px;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(121, 121, 121, 0.74);
 }
 
 .terminal-host .xterm .xterm-scrollable-element > .scrollbar {
@@ -250,7 +265,7 @@ textarea {
 }
 
 .terminal-host .xterm .xterm-scrollable-element > .scrollbar.vertical {
-  width: 1px !important;
+  width: 8px !important;
 }
 
 .terminal-host .xterm .xterm-scrollable-element > .scrollbar.horizontal {
@@ -258,7 +273,8 @@ textarea {
 }
 
 .terminal-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
-  width: 1px !important;
+  width: 8px !important;
+  min-height: 20px;
   border-radius: 999px;
 }
 

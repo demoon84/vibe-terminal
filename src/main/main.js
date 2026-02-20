@@ -42,14 +42,14 @@ app.on("second-instance", () => {
 const APP_ICON_CANDIDATE_PATHS =
   process.platform === "darwin"
     ? [
-        path.join(__dirname, "..", "..", "assets", "app-icon-mac.png"),
-        path.join(__dirname, "..", "..", "assets", "app-icon.png"),
-        path.join(__dirname, "..", "renderer", "app-icon.png"),
-      ]
+      path.join(__dirname, "..", "..", "assets", "app-icon-mac.png"),
+      path.join(__dirname, "..", "..", "assets", "app-icon.png"),
+      path.join(__dirname, "..", "renderer", "app-icon.png"),
+    ]
     : [
-        path.join(__dirname, "..", "..", "assets", "app-icon.png"),
-        path.join(__dirname, "..", "renderer", "app-icon.png"),
-      ];
+      path.join(__dirname, "..", "..", "assets", "app-icon.png"),
+      path.join(__dirname, "..", "renderer", "app-icon.png"),
+    ];
 const APP_ICON_PATH =
   APP_ICON_CANDIDATE_PATHS.find(
     (candidatePath) => typeof candidatePath === "string" && fs.existsSync(candidatePath),
@@ -105,16 +105,7 @@ const AGENT_INSTALL_TARGETS = Object.freeze({
 const TERMINAL_COLOR_MODE = String(process.env.VIBE_TERMINAL_COLOR_MODE || "force")
   .trim()
   .toLowerCase();
-const TMUX_INSTALL_PAGE_URL = "https://github.com/tmux/tmux/wiki/Installing";
-const FORCE_TMUX_NOT_INSTALLED = String(process.env.VIBE_FORCE_TMUX_NOT_INSTALLED || "")
-  .trim()
-  .toLowerCase() === "1";
-const FORCE_TMUX_INSTALL_FAIL = String(process.env.VIBE_FORCE_TMUX_INSTALL_FAIL || "")
-  .trim()
-  .toLowerCase() === "1";
-const FORCE_TMUX_INSTALL_SUCCESS = String(process.env.VIBE_FORCE_TMUX_INSTALL_SUCCESS || "")
-  .trim()
-  .toLowerCase() === "1";
+
 const PWSH7_MIN_REQUIRED_VERSION = "7.0.0";
 const PWSH7_INSTALL_PAGE_URL = "https://aka.ms/powershell-release?tag=stable";
 const FORCE_PWSH7_INSTALL_FAIL = String(process.env.VIBE_FORCE_PWSH7_INSTALL_FAIL || "")
@@ -128,6 +119,10 @@ const CLIPBOARD_RATE_LIMIT_MAX_CALLS = 40;
 let hasWindowCloseCleanupRun = false;
 const isProductionBuild = () =>
   app.isPackaged || String(process.env.NODE_ENV || "").toLowerCase() === "production";
+const SHOULD_AUTO_OPEN_DEVTOOLS =
+  String(process.env.VIBE_OPEN_DEVTOOLS || "")
+    .trim()
+    .toLowerCase() === "1";
 const clipboardRequestBuckets = new Map();
 
 function isWithinRateLimit(bucketMap, key, windowMs, maxCalls) {
@@ -574,315 +569,167 @@ function openNodeInstallPage() {
   }
 }
 
-function buildTmuxInstallCommand() {
-  if (process.platform === "darwin") {
-    return "brew install tmux";
-  }
-  if (process.platform === "win32") {
-    return "winget install --id GnuWin32.Tmux --source winget -e";
-  }
-  if (process.platform === "linux") {
-    return "sudo apt-get install -y tmux";
-  }
-  return TMUX_INSTALL_PAGE_URL;
-}
 
-function canAutoInstallTmux() {
-  if (process.platform === "darwin") {
-    return isExecutableAvailable("brew");
-  }
-  if (process.platform === "win32") {
-    return isExecutableAvailable("winget");
-  }
-  return false;
-}
+const KNOWN_EDITORS = [
+  { id: "idea", name: "IntelliJ IDEA", app: "IntelliJ IDEA.app", command: ["open", "-a", "IntelliJ IDEA"] },
+  { id: "vscode", name: "VS Code", app: "Visual Studio Code.app", command: ["code"] },
+  { id: "cursor", name: "Cursor", app: "Cursor.app", command: ["cursor"] },
+  { id: "finder", name: "Finder", app: null, command: ["open"] },
+  { id: "antigravity", name: "Antigravity", app: "Antigravity.app", command: ["open", "-a", "Antigravity"] },
+  { id: "xcode", name: "Xcode", app: "Xcode.app", command: ["open", "-a", "Xcode"] },
+];
 
-function queryTmuxStatus() {
-  const installed = FORCE_TMUX_NOT_INSTALLED ? false : isExecutableAvailable("tmux");
-  const supportedPlatform = process.platform === "darwin" || process.platform === "win32";
-  if (installed) {
-    return {
-      ok: true,
-      supportedPlatform,
-      installed: true,
-      needsInstall: false,
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-      autoInstallAvailable: canAutoInstallTmux(),
-      reason: FORCE_TMUX_NOT_INSTALLED ? "forced-tmux-not-installed" : "compatible",
-    };
-  }
+let cachedInstalledEditors = null;
 
-  if (!supportedPlatform) {
-    return {
-      ok: true,
-      supportedPlatform: false,
-      installed: false,
-      needsInstall: false,
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-      autoInstallAvailable: false,
-      reason: "unsupported-platform",
-    };
-  }
-
-  return {
-    ok: true,
-    supportedPlatform: true,
-    installed: false,
-    needsInstall: true,
-    installCommand: buildTmuxInstallCommand(),
-    installPageUrl: TMUX_INSTALL_PAGE_URL,
-    autoInstallAvailable: canAutoInstallTmux(),
-    reason: FORCE_TMUX_NOT_INSTALLED ? "forced-tmux-not-installed" : "tmux-not-found",
-  };
-}
-
-function openTmuxInstallPage() {
+async function getMacAppIconBase64(appPath) {
   try {
-    shell.openExternal(TMUX_INSTALL_PAGE_URL);
-    return true;
-  } catch (_error) {
-    return false;
-  }
-}
-
-function buildTmuxInstallAttempts() {
-  if (process.platform === "darwin") {
-    return [
-      {
-        command: "brew",
-        args: ["install", "tmux"],
-        errorPrefix: "brew",
-      },
-    ];
-  }
-  if (process.platform === "win32") {
-    const agreementArgs = ["--accept-package-agreements", "--accept-source-agreements"];
-    return [
-      {
-        command: "winget",
-        args: [
-          "install",
-          "--id",
-          "GnuWin32.Tmux",
-          "--source",
-          "winget",
-          "-e",
-          ...agreementArgs,
-        ],
-        errorPrefix: "winget-id",
-      },
-      {
-        command: "winget",
-        args: [
-          "install",
-          "tmux",
-          "--source",
-          "winget",
-          ...agreementArgs,
-        ],
-        errorPrefix: "winget-query",
-      },
-    ];
-  }
-  return [];
-}
-
-function runTmuxInstallAttempt(attempt) {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const finish = (payload) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve({
-        ...payload,
-        stdout: trimTail(stdout),
-        stderr: trimTail(stderr),
-      });
-    };
-
-    let child = null;
+    const infoPlistPath = path.join(appPath, "Contents", "Info.plist");
+    if (!require("node:fs").existsSync(infoPlistPath)) {
+      return null;
+    }
+    // Very basic regex to find CFBundleIconFile or we can just use defaults read. Let's use execSync for defaults to be safe.
+    let iconName = "";
     try {
-      child = spawn(attempt.command, attempt.args, {
-        cwd: app.getPath("home"),
-        env: withAugmentedPath(process.env),
-        stdio: ["ignore", "pipe", "pipe"],
-        shell: false,
-        windowsHide: true,
-      });
-    } catch (error) {
-      finish({
-        ok: false,
-        error: `${attempt.errorPrefix}-spawn-failed:${String(error)}`,
-      });
-      return;
+      iconName = require("node:child_process")
+        .execSync(`defaults read "${infoPlistPath}" CFBundleIconFile`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .trim();
+    } catch (_) {
+      // Sometimes defaults read fails or CFBundleIconFile is missing.
+      return null;
     }
 
-    child.stdout?.on("data", (chunk) => {
-      stdout = trimTail(`${stdout}${String(chunk || "")}`);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr = trimTail(`${stderr}${String(chunk || "")}`);
+    if (!iconName.endsWith(".icns")) {
+      iconName += ".icns";
+    }
+
+    const icnsPath = path.join(appPath, "Contents", "Resources", iconName);
+    if (!require("node:fs").existsSync(icnsPath)) {
+      return null;
+    }
+
+    // Use sips to convert the .icns file to a png buffer and output as base64
+    const tmpDir = require("node:os").tmpdir();
+    const tempPngPath = path.join(tmpDir, `vibe-temp-icon-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+
+    // Convert highest res icon to 64x64 PNG
+    require("node:child_process").execSync(`sips -s format png -z 64 64 "${icnsPath}" --out "${tempPngPath}"`, {
+      stdio: "ignore"
     });
 
-    child.on("error", (error) => {
-      finish({
-        ok: false,
-        error: `${attempt.errorPrefix}-spawn-error:${String(error)}`,
-      });
-    });
+    const pngBuffer = require("node:fs").readFileSync(tempPngPath);
+    require("node:fs").unlinkSync(tempPngPath);
 
-    child.on("close", (code) => {
-      if (code === 0) {
-        finish({
-          ok: true,
-          error: null,
-        });
-        return;
+    return `data:image/png;base64,${pngBuffer.toString("base64")}`;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function queryInstalledEditors() {
+  if (cachedInstalledEditors) {
+    return cachedInstalledEditors;
+  }
+
+  const installed = [];
+  for (const editor of KNOWN_EDITORS) {
+    if (!editor.app) {
+      // Finders etc (null app path) won't have an icon via getFileIcon out of the box unless we pass a valid path.
+      // We can use /System/Library/CoreServices/Finder.app
+      if (editor.id === "finder") {
+        try {
+          const finderPath = "/System/Library/CoreServices/Finder.app";
+          const icon = await getMacAppIconBase64(finderPath);
+          if (icon) {
+            installed.push({ id: editor.id, name: editor.name, icon });
+          } else {
+            installed.push({ id: editor.id, name: editor.name });
+          }
+        } catch (_) {
+          installed.push({ id: editor.id, name: editor.name });
+        }
+      } else {
+        installed.push({ id: editor.id, name: editor.name });
       }
-      finish({
-        ok: false,
-        error: `${attempt.errorPrefix}-exit-${String(code)}`,
-      });
-    });
-  });
+      continue;
+    }
+
+    const appPath = path.join("/Applications", editor.app);
+    try {
+      const stat = require("node:fs").statSync(appPath);
+      if (stat.isDirectory()) {
+        try {
+          const icon = await getMacAppIconBase64(appPath);
+          if (icon) {
+            installed.push({ id: editor.id, name: editor.name, icon });
+          } else {
+            installed.push({ id: editor.id, name: editor.name });
+          }
+        } catch (e) {
+          installed.push({ id: editor.id, name: editor.name });
+        }
+      }
+    } catch (_error) {
+      // Not installed in /Applications, maybe ~/Applications?
+      const userAppPath = path.join(app.getPath("home"), "Applications", editor.app);
+      try {
+        const stat2 = require("node:fs").statSync(userAppPath);
+        if (stat2.isDirectory()) {
+          try {
+            const icon = await getMacAppIconBase64(userAppPath);
+            if (icon) {
+              installed.push({ id: editor.id, name: editor.name, icon });
+            } else {
+              installed.push({ id: editor.id, name: editor.name });
+            }
+          } catch (e) {
+            installed.push({ id: editor.id, name: editor.name });
+          }
+        }
+      } catch (_e) {
+        // Really not installed.
+      }
+    }
+  }
+
+  cachedInstalledEditors = installed;
+  return installed;
 }
 
-async function installTmux() {
-  const status = queryTmuxStatus();
-  if (status.ok !== true) {
-    return {
-      ok: false,
-      error: "status-check-failed",
-    };
+function openInEditor(editorId, cwd) {
+  const editor = KNOWN_EDITORS.find((e) => e.id === editorId);
+  if (!editor) {
+    return { ok: false, error: "unknown-editor" };
   }
 
-  if (!status.supportedPlatform) {
-    const opened = openTmuxInstallPage();
-    return {
-      ok: false,
-      installed: false,
-      needsInstall: true,
-      action: opened ? "opened-install-page" : "open-install-page-failed",
-      error: "unsupported-platform",
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-    };
-  }
+  const targetPath = typeof cwd === "string" && cwd.trim() ? cwd.trim() : process.cwd();
 
-  if (!status.needsInstall) {
-    return {
-      ok: true,
-      installed: true,
-      needsInstall: false,
-      action: "already-installed",
-    };
-  }
-
-  if (FORCE_TMUX_INSTALL_FAIL) {
-    console.info("[tmux-install] forced failure path");
-    const opened = openTmuxInstallPage();
-    return {
-      ok: false,
-      installed: false,
-      needsInstall: true,
-      action: opened ? "opened-install-page" : "open-install-page-failed",
-      error: "forced-install-failure",
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-    };
-  }
-
-  if (FORCE_TMUX_INSTALL_SUCCESS) {
-    console.info("[tmux-install] forced success path");
-    return {
-      ok: true,
-      installed: true,
-      needsInstall: false,
-      action: "forced-install-success",
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-    };
-  }
-
-  if (!status.autoInstallAvailable) {
-    const opened = openTmuxInstallPage();
-    return {
-      ok: false,
-      installed: false,
-      needsInstall: true,
-      action: opened ? "opened-install-page" : "open-install-page-failed",
-      error: process.platform === "win32" ? "winget-not-found" : "brew-not-found",
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-    };
-  }
-
-  const attempts = buildTmuxInstallAttempts();
-  let combinedStdout = "";
-  let combinedStderr = "";
-  let lastError = "install-attempt-unavailable";
-
-  for (const attempt of attempts) {
-    const result = await runTmuxInstallAttempt(attempt);
-    if (result.stdout) {
-      combinedStdout = trimTail(`${combinedStdout}${combinedStdout ? "\n" : ""}${result.stdout}`);
+  try {
+    if (editor.app && editor.command[0] === "open") {
+      // Use macOS open -a for apps that don't have a CLI command
+      spawn("open", ["-a", editor.app, targetPath], {
+        cwd: targetPath,
+        env: withAugmentedPath(process.env),
+        stdio: "ignore",
+        detached: true,
+        shell: false,
+      }).unref();
+    } else {
+      // Use the CLI command directly
+      const [cmd, ...args] = editor.command;
+      spawn(cmd, [...args, targetPath], {
+        cwd: targetPath,
+        env: withAugmentedPath(process.env),
+        stdio: "ignore",
+        detached: true,
+        shell: false,
+      }).unref();
     }
-    if (result.stderr) {
-      combinedStderr = trimTail(`${combinedStderr}${combinedStderr ? "\n" : ""}${result.stderr}`);
-    }
-    if (result.error) {
-      lastError = String(result.error);
-    }
-
-    const installed = isExecutableAvailable("tmux");
-    if (result.ok && installed) {
-      return {
-        ok: true,
-        installed: true,
-        needsInstall: false,
-        action: "auto-installed",
-        installCommand: buildTmuxInstallCommand(),
-        installPageUrl: TMUX_INSTALL_PAGE_URL,
-        stdout: trimTail(combinedStdout),
-        stderr: trimTail(combinedStderr),
-      };
-    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-
-  const installed = isExecutableAvailable("tmux");
-  if (installed) {
-    return {
-      ok: true,
-      installed: true,
-      needsInstall: false,
-      action: "auto-installed",
-      installCommand: buildTmuxInstallCommand(),
-      installPageUrl: TMUX_INSTALL_PAGE_URL,
-      stdout: trimTail(combinedStdout),
-      stderr: trimTail(combinedStderr),
-    };
-  }
-
-  const opened = openTmuxInstallPage();
-  return {
-    ok: false,
-    installed: false,
-    needsInstall: true,
-    action: opened ? "opened-install-page" : "open-install-page-failed",
-    error: lastError,
-    installCommand: buildTmuxInstallCommand(),
-    installPageUrl: TMUX_INSTALL_PAGE_URL,
-    stdout: trimTail(combinedStdout),
-    stderr: trimTail(combinedStderr),
-  };
 }
+
 
 function getPwshExecutableName() {
   return process.platform === "win32" ? "pwsh.exe" : "pwsh";
@@ -1840,12 +1687,12 @@ async function queryGeminiModelCatalog() {
 
 function createRendererHotReload(window) {
   if (!window || window.isDestroyed() || app.isPackaged) {
-    return () => {};
+    return () => { };
   }
 
   const rendererRoot = path.join(__dirname, "..", "renderer");
   if (!fs.existsSync(rendererRoot)) {
-    return () => {};
+    return () => { };
   }
 
   let reloadTimer = null;
@@ -1942,6 +1789,19 @@ function createMainWindow() {
   mainWindow.setMenuBarVisibility(false);
   if (typeof mainWindow.removeMenu === "function") {
     mainWindow.removeMenu();
+  }
+
+  if (!isProductionBuild() && SHOULD_AUTO_OPEN_DEVTOOLS) {
+    mainWindow.webContents.once("did-finish-load", () => {
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        return;
+      }
+      const { webContents: targetContents } = mainWindow;
+      if (targetContents.isDevToolsOpened()) {
+        return;
+      }
+      targetContents.openDevTools({ mode: "detach", activate: true });
+    });
   }
 
   mainWindow.on("close", () => {
@@ -2182,25 +2042,7 @@ app.whenReady().then(() => {
     return installAgentLatest(validated.value.agentCommand);
   });
 
-  ipcMain.handle(IPC_CHANNELS.APP_TMUX_STATUS, (event) => {
-    if (!isTrustedRendererEvent(event)) {
-      return {
-        ok: false,
-        error: "forbidden",
-      };
-    }
-    return queryTmuxStatus();
-  });
 
-  ipcMain.handle(IPC_CHANNELS.APP_TMUX_INSTALL, async (event) => {
-    if (!isTrustedRendererEvent(event)) {
-      return {
-        ok: false,
-        error: "forbidden",
-      };
-    }
-    return installTmux();
-  });
 
   ipcMain.handle(IPC_CHANNELS.APP_PWSH7_STATUS, (event) => {
     if (!isTrustedRendererEvent(event)) {
@@ -2316,6 +2158,46 @@ app.whenReady().then(() => {
     }
     clipboard.writeText(validated.value.text);
     return { ok: true };
+  });
+
+  ipcMain.handle("app:query-editors", async (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return { ok: false, error: "forbidden" };
+    }
+    const editors = await queryInstalledEditors();
+    return { ok: true, editors };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_OPEN_IN_EDITOR, (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return { ok: false, error: "forbidden" };
+    }
+    const editorId = typeof payload?.editorId === "string" ? payload.editorId.trim() : "";
+    const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() : "";
+    if (!editorId) {
+      return { ok: false, error: "invalid-editor-id" };
+    }
+    return openInEditor(editorId, cwd);
+  });
+
+  ipcMain.handle("app:read-agents-policy", (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return { ok: false, error: "forbidden" };
+    }
+    try {
+      const policyPath = path.join(app.getAppPath(), "AGENTS.md");
+      if (fs.existsSync(policyPath)) {
+        return { ok: true, content: fs.readFileSync(policyPath, "utf-8") };
+      }
+      // Packaged app might have it outside app.asar, check process.cwd() fallback
+      const fallbackPath = path.join(process.cwd(), "AGENTS.md");
+      if (fs.existsSync(fallbackPath)) {
+        return { ok: true, content: fs.readFileSync(fallbackPath, "utf-8") };
+      }
+      return { ok: true, content: null };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
   });
 
   const layoutStore = new LayoutStore(path.join(app.getPath("userData"), "state"));

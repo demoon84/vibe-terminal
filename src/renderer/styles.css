@@ -113,7 +113,7 @@ body {
   height: 0;
 }
 
-.titlebar-preset-group > * {
+.titlebar-preset-group>* {
   flex: 0 0 auto;
   white-space: nowrap;
 }
@@ -396,7 +396,7 @@ button:hover {
   width: 100%;
 }
 
-.pane-meta > span {
+.pane-meta>span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -489,10 +489,10 @@ button:hover {
 }
 
 .pane-full-access-btn.is-selected {
-  color: #fff0cb;
-  border-color: rgba(212, 153, 0, 0.74);
-  background: linear-gradient(180deg, #5a4311, #4a360d);
-  box-shadow: 0 0 0 1px rgba(212, 153, 0, 0.22);
+  color: var(--muted);
+  border-color: var(--border);
+  background: #2d2d30;
+  box-shadow: none;
 }
 
 .pane-full-access-btn,
@@ -508,6 +508,98 @@ button:hover {
 
 .pane-agent-btn.is-selected {
   cursor: default;
+}
+
+.pane-editor-group {
+  position: relative;
+  display: inline-flex;
+}
+
+.pane-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #2d2d30;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pane-open-btn:hover {
+  background: #3e3e42;
+  border-color: rgba(181, 181, 181, 0.4);
+}
+
+.pane-open-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 3px;
+}
+
+.pane-open-chevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0.6;
+}
+
+.pane-editor-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 160px;
+  background: #252526;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  z-index: 100;
+  display: none;
+  flex-direction: column;
+}
+
+.pane-editor-menu.is-open {
+  display: flex;
+}
+
+.pane-editor-menu-header {
+  padding: 6px 8px 4px;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.pane-editor-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+}
+
+.pane-editor-menu-item:hover {
+  background: #37373d;
+}
+
+.pane-editor-menu-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  border-radius: 3px;
 }
 
 .pane-terminate-btn {
@@ -697,7 +789,8 @@ button:hover {
 .terminal-host .xterm-viewport {
   overflow-y: auto !important;
   overscroll-behavior: contain;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(121, 121, 121, 0.62) #1e1e1e;
   background-color: #1e1e1e !important;
   user-select: text;
   -webkit-user-select: text;
@@ -708,29 +801,44 @@ button:hover {
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  width: 10px;
+  height: 10px;
 }
 
-.terminal-host .xterm .xterm-scrollable-element > .scrollbar {
+.terminal-host .xterm-viewport::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(121, 121, 121, 0.56);
+  border: 2px solid #1e1e1e;
+  border-radius: 999px;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(121, 121, 121, 0.74);
+}
+
+.terminal-host .xterm .xterm-scrollable-element>.scrollbar {
   background: #1e1e1e !important;
 }
 
-.terminal-host .xterm .xterm-scrollable-element > .scrollbar.vertical {
-  width: 1px !important;
+.terminal-host .xterm .xterm-scrollable-element>.scrollbar.vertical {
+  width: 8px !important;
 }
 
-.terminal-host .xterm .xterm-scrollable-element > .scrollbar.horizontal {
+.terminal-host .xterm .xterm-scrollable-element>.scrollbar.horizontal {
   display: none !important;
   height: 0 !important;
 }
 
-.terminal-host .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
-  width: 1px !important;
+.terminal-host .xterm .xterm-scrollable-element>.scrollbar.vertical>.slider {
+  width: 8px !important;
+  min-height: 20px;
   border-radius: 999px;
 }
 
-.terminal-host .xterm .xterm-scrollable-element > .scrollbar.horizontal > .slider {
+.terminal-host .xterm .xterm-scrollable-element>.scrollbar.horizontal>.slider {
   height: 1px !important;
   border-radius: 999px;
 }
@@ -751,23 +859,35 @@ button:hover {
 
 .agent-install-card {
   width: min(432px, calc(100vw - 32px));
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
-  padding: 36px 36px 32px;
-  background: linear-gradient(180deg, #2d2d30, #252526);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  padding: 32px;
+  background: rgba(30, 30, 30, 0.75);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
   text-align: center;
+  transform: translateY(10px);
+  opacity: 0;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease-out;
+}
+
+.agent-install-overlay.visible .agent-install-card {
+  transform: translateY(0);
+  opacity: 1;
 }
 
 .agent-install-card h2 {
-  margin: 0 0 17px;
+  margin: 0 0 16px;
   font-size: 16px;
-  color: var(--text);
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.01em;
 }
 
 .agent-install-message {
-  margin: 0 0 22px;
-  color: var(--text);
+  margin: 0 0 24px;
+  color: rgba(255, 255, 255, 0.65);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -808,11 +928,27 @@ button:hover {
 }
 
 .agent-install-actions button {
-  min-width: 72px;
+  min-width: 80px;
+  height: 32px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border: none;
+  transition: background 0.15s ease;
+}
+
+.agent-install-actions button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.agent-install-actions button:active {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .terminal-font-card {
-  width: min(460px, calc(100vw - 32px));
+  width: min(400px, calc(100vw - 32px));
 }
 
 .terminal-font-select {
@@ -828,54 +964,71 @@ button:hover {
 }
 
 .terminal-font-size-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 56px auto;
+  display: flex;
   align-items: center;
-  column-gap: 8px;
-  margin-bottom: 12px;
-}
-
-.terminal-font-size-label {
-  color: var(--text);
-  font-size: 12px;
-  white-space: nowrap;
+  gap: 12px;
+  margin-bottom: 20px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .terminal-font-size-range {
-  width: 100%;
+  flex: 1;
+  accent-color: #0A84FF;
+  height: 4px;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  outline: none;
 }
 
-.terminal-font-size-input {
-  width: 56px;
-  height: 30px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #1f1f1f;
-  color: var(--text);
-  font-size: 13px;
+.terminal-font-size-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.terminal-font-size-range::-webkit-slider-thumb:active {
+  transform: scale(1.1);
+}
+
+.terminal-font-size-display {
+  width: 32px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
   text-align: right;
-  padding: 0 6px;
+  font-variant-numeric: tabular-nums;
 }
 
 .terminal-font-size-unit {
-  color: var(--muted);
-  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .terminal-font-preview {
-  margin: 0 0 18px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
+  margin: 0 0 24px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: 8px;
-  background: #1f1f1f;
-  color: #d4d4d4;
+  background: rgba(0, 0, 0, 0.3);
+  color: #e3e3e3;
   font-size: var(--terminal-font-size);
-  line-height: 1.45;
+  line-height: 1.5;
   font-family: var(--terminal-font-family);
+  text-align: center;
 }
 
-.terminal-font-select:focus-visible,
-.terminal-font-size-input:focus-visible {
+.terminal-font-select:focus-visible {
   outline: 1px solid rgba(181, 181, 181, 0.62);
   outline-offset: 1px;
 }
@@ -924,6 +1077,7 @@ button:hover {
   from {
     transform: rotate(0deg);
   }
+
   to {
     transform: rotate(360deg);
   }

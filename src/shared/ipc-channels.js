@@ -4,6 +4,7 @@ const IPC_CHANNELS = Object.freeze({
   PTY_RESIZE: "pty:resize",
   PTY_KILL: "pty:kill",
   PTY_CHANGE_DIRECTORY: "pty:change-directory",
+
   PTY_DATA: "pty:data",
   PTY_EXIT: "pty:exit",
   PTY_STATUS: "pty:status",
@@ -21,8 +22,7 @@ const IPC_CHANNELS = Object.freeze({
   APP_PICK_FILES: "app:pick-files",
   APP_AGENT_INSTALL_STATUS: "app:agent-install-status",
   APP_AGENT_INSTALL_LATEST: "app:agent-install-latest",
-  APP_TMUX_STATUS: "app:tmux-status",
-  APP_TMUX_INSTALL: "app:tmux-install",
+
   APP_PWSH7_STATUS: "app:pwsh7-status",
   APP_PWSH7_INSTALL: "app:pwsh7-install",
   APP_NODE_RUNTIME_STATUS: "app:node-runtime-status",
@@ -33,6 +33,9 @@ const IPC_CHANNELS = Object.freeze({
   APP_CLIPBOARD_READ: "app:clipboard-read",
   APP_CLIPBOARD_IMAGE_TO_TEMP: "app:clipboard-image-to-temp",
   APP_CLIPBOARD_WRITE: "app:clipboard-write",
+  APP_QUERY_EDITORS: "app:query-editors",
+  APP_OPEN_IN_EDITOR: "app:open-in-editor",
+  APP_READ_AGENTS_POLICY: "app:read-agents-policy",
 });
 
 module.exports = {

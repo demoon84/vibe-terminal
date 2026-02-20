@@ -1,138 +1,99 @@
 <!doctype html>
 <html lang="ko">
-  <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
-    />
-    <title>Vibe Terminal</title>
-    <link rel="icon" type="image/png" href="./app-icon.png" />
-    <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <header class="window-titlebar">
-      <div id="window-drag-region" class="window-drag-region">
-        <span class="titlebar-app-name">
-          <img
-            class="titlebar-app-icon"
-            src="./app-icon.png"
-            alt=""
-            aria-hidden="true"
-          />
-          <span class="titlebar-app-text">Vibe Terminal</span>
-        </span>
-        <div class="titlebar-preset-group">
-          <button data-preset-button="1x2">2분할</button>
-          <button data-preset-button="1x4">4분할</button>
-          <button data-preset-button="2x6">6분할</button>
-          <button data-preset-button="2x8">8분할</button>
-          <button data-preset-button="3x12">12분할</button>
-          <span
-            id="titlebar-path-divider"
-            class="titlebar-preset-divider"
-            aria-hidden="true"
-            >|</span
-          >
-          <button id="titlebar-mount-codex-btn" class="titlebar-app-mount-btn" type="button">
-            Codex
-          </button>
-          <button id="titlebar-mount-claude-btn" class="titlebar-app-mount-btn" type="button">
-            Claude
-          </button>
-          <button id="titlebar-mount-gemini-btn" class="titlebar-app-mount-btn" type="button">
-            Gemini
-          </button>
-          <span class="titlebar-preset-divider" aria-hidden="true">|</span>
-          <button id="titlebar-path-setting-btn" class="titlebar-path-setting-btn" type="button">
-            경로설정
-          </button>
-          <button id="titlebar-font-setting-btn" class="titlebar-path-setting-btn" type="button">
-            폰트
-          </button>
-          <button id="titlebar-all-exit-btn" class="titlebar-all-exit-btn" type="button">
-            모두종료
-          </button>
-        </div>
-      </div>
-      <div class="window-controls">
-        <button
-          id="window-minimize-btn"
-          class="window-control-btn window-control-minimize"
-          type="button"
-          aria-label="Minimize"
-        >
-          <span class="wc-icon wc-icon-minimize" aria-hidden="true"></span>
-        </button>
-        <button
-          id="window-maximize-btn"
-          class="window-control-btn window-control-maximize"
-          type="button"
-          aria-label="Maximize"
-        >
-          <span class="wc-icon wc-icon-maximize" aria-hidden="true"></span>
-        </button>
-        <button
-          id="window-close-btn"
-          class="window-control-btn window-control-close danger"
-          type="button"
-          aria-label="Close"
-        >
-          <span class="wc-icon wc-icon-close" aria-hidden="true"></span>
-        </button>
-      </div>
-    </header>
 
-    <main id="pane-grid" class="pane-grid"></main>
-    <div id="status-line" class="status-line" aria-live="polite"></div>
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
+  <title>Vibe Terminal</title>
+  <link rel="icon" type="image/png" href="./app-icon.png" />
+  <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
 
-    <div id="terminal-font-overlay" class="agent-install-overlay" aria-hidden="true">
-      <div class="agent-install-card terminal-font-card" role="dialog" aria-modal="true" aria-labelledby="terminal-font-title">
-        <h2 id="terminal-font-title">터미널 폰트 변경</h2>
-        <p class="agent-install-message">패널 전체에 적용되며 앱 재시작 후에도 유지됩니다.</p>
-        <select id="terminal-font-select" class="terminal-font-select" aria-label="터미널 폰트 선택"></select>
-        <div class="terminal-font-size-row">
-          <label for="terminal-font-size-range" class="terminal-font-size-label">글자 크기</label>
-          <input
-            id="terminal-font-size-range"
-            class="terminal-font-size-range"
-            type="range"
-            min="10"
-            max="24"
-            step="1"
-            aria-label="터미널 폰트 크기"
-          />
-          <input
-            id="terminal-font-size-input"
-            class="terminal-font-size-input"
-            type="number"
-            min="10"
-            max="24"
-            step="1"
-            aria-label="터미널 폰트 크기 값"
-          />
-          <span class="terminal-font-size-unit">px</span>
-        </div>
-        <p id="terminal-font-preview" class="terminal-font-preview">AaBbCc 1234 한글 테스트</p>
-        <div class="agent-install-actions">
-          <button id="terminal-font-cancel-btn" type="button">닫기</button>
-          <button id="terminal-font-apply-btn" type="button">적용</button>
-        </div>
+<body>
+  <header class="window-titlebar">
+    <div id="window-drag-region" class="window-drag-region">
+      <span class="titlebar-app-name">
+        <img class="titlebar-app-icon" src="./app-icon.png" alt="" aria-hidden="true" />
+        <span class="titlebar-app-text">Vibe Terminal</span>
+      </span>
+      <div class="titlebar-preset-group">
+        <button data-preset-button="1x2">2분할</button>
+        <button data-preset-button="1x4">4분할</button>
+        <button data-preset-button="2x6">6분할</button>
+        <button data-preset-button="2x8">8분할</button>
+        <button data-preset-button="3x12">12분할</button>
+        <span id="titlebar-path-divider" class="titlebar-preset-divider" aria-hidden="true">|</span>
+        <button id="titlebar-mount-codex-btn" class="titlebar-app-mount-btn" type="button">
+          Codex
+        </button>
+        <button id="titlebar-mount-claude-btn" class="titlebar-app-mount-btn" type="button">
+          Claude
+        </button>
+        <button id="titlebar-mount-gemini-btn" class="titlebar-app-mount-btn" type="button">
+          Gemini
+        </button>
+        <span class="titlebar-preset-divider" aria-hidden="true">|</span>
+        <button id="titlebar-path-setting-btn" class="titlebar-path-setting-btn" type="button">
+          경로설정
+        </button>
+        <button id="titlebar-font-setting-btn" class="titlebar-path-setting-btn" type="button">
+          폰트
+        </button>
+        <button id="titlebar-all-exit-btn" class="titlebar-all-exit-btn" type="button">
+          모두종료
+        </button>
       </div>
     </div>
+    <div class="window-controls">
+      <button id="window-minimize-btn" class="window-control-btn window-control-minimize" type="button"
+        aria-label="Minimize">
+        <span class="wc-icon wc-icon-minimize" aria-hidden="true"></span>
+      </button>
+      <button id="window-maximize-btn" class="window-control-btn window-control-maximize" type="button"
+        aria-label="Maximize">
+        <span class="wc-icon wc-icon-maximize" aria-hidden="true"></span>
+      </button>
+      <button id="window-close-btn" class="window-control-btn window-control-close danger" type="button"
+        aria-label="Close">
+        <span class="wc-icon wc-icon-close" aria-hidden="true"></span>
+      </button>
+    </div>
+  </header>
 
-    <div id="shutdown-overlay" class="shutdown-overlay" aria-hidden="true">
-      <div class="shutdown-card" role="status" aria-live="polite">
-        <span class="shutdown-spinner" aria-hidden="true"></span>
-        <p>터미널을 모두 종료중입니다.</p>
+  <main id="pane-grid" class="pane-grid"></main>
+  <div id="status-line" class="status-line" aria-live="polite"></div>
+
+  <div id="terminal-font-overlay" class="agent-install-overlay" aria-hidden="true">
+    <div class="agent-install-card terminal-font-card" role="dialog" aria-modal="true"
+      aria-labelledby="terminal-font-title">
+      <h2 id="terminal-font-title">터미널 글자 크기 변경</h2>
+      <div class="terminal-font-size-row">
+        <input id="terminal-font-size-range" class="terminal-font-size-range" type="range" min="10" max="24" step="1"
+          aria-label="터미널 폰트 크기" />
+        <div id="terminal-font-size-display" class="terminal-font-size-display" aria-live="polite">12</div>
+        <span class="terminal-font-size-unit">px</span>
+      </div>
+      <p id="terminal-font-preview" class="terminal-font-preview">AaBbCc 1234 한글 테스트</p>
+      <div class="agent-install-actions">
+        <button id="terminal-font-cancel-btn" type="button">닫기</button>
       </div>
     </div>
+  </div>
 
-    <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
-    <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
-    <script src="./renderer.js"></script>
-  </body>
+  <div id="shutdown-overlay" class="shutdown-overlay" aria-hidden="true">
+    <div class="shutdown-card" role="status" aria-live="polite">
+      <span class="shutdown-spinner" aria-hidden="true"></span>
+      <p>터미널을 모두 종료중입니다.</p>
+    </div>
+  </div>
+
+  <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+
 </html>

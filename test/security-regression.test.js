@@ -50,8 +50,7 @@ test("sensitive main-process IPC handlers enforce trusted renderer guard", () =>
     "APP_WINDOW_CLOSE",
     "APP_PICK_DIRECTORY",
     "APP_PICK_FILES",
-    "APP_TMUX_STATUS",
-    "APP_TMUX_INSTALL",
+
     "APP_NODE_RUNTIME_STATUS",
     "APP_NODE_RUNTIME_INSTALL",
     "APP_CLIPBOARD_READ",
@@ -75,6 +74,7 @@ test("PTY IPC handlers enforce trusted renderer guard and capability tokens", ()
     "PTY_RESIZE",
     "PTY_KILL",
     "PTY_CHANGE_DIRECTORY",
+
     "LAYOUT_SET_PRESET",
     "LAYOUT_RESTORE",
   ];

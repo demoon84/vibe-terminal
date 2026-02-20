@@ -211,6 +211,8 @@ function registerIpcRoutes({ ipcMain, sessionManager, layoutStore, getMainWindow
     return sessionManager.changeDirectory(validated.value.sessionId, validated.value.cwd);
   });
 
+
+
   ipcMain.handle(IPC_CHANNELS.LAYOUT_SET_PRESET, (event, payload = {}) => {
     if (!isTrustedRendererEvent(event)) {
       throw new Error("forbidden");

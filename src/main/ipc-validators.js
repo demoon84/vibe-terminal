@@ -6,6 +6,7 @@ const MAX_PTY_WRITE_CHARS = 8192;
 const MAX_PATH_CHARS = 1024;
 const MAX_ENV_KEY_CHARS = 128;
 const MAX_ENV_VALUE_CHARS = 4096;
+
 const CAPABILITY_TOKEN_MIN_LENGTH = 16;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -191,6 +192,8 @@ function validatePtyChangeDirectoryPayload(payload) {
   return { ok: true, value: { sessionId, capabilityToken, cwd } };
 }
 
+
+
 function validateLayoutSetPresetPayload(payload) {
   if (!isPlainObject(payload)) {
     return { ok: false, error: "invalid-payload" };
@@ -282,6 +285,7 @@ module.exports = {
   validatePtyResizePayload,
   validatePtyKillPayload,
   validatePtyChangeDirectoryPayload,
+
   validateLayoutSetPresetPayload,
   validatePathDialogPayload,
   validateAgentCommandPayload,

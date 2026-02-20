@@ -53,6 +53,55 @@ function isImeCompositionEvent(event) {
   return key === "process" || key === "hangulmode" || key === "junjamode" || code === 229;
 }
 
+function getTerminalMouseTrackingMode(terminal) {
+  const mode = String(terminal?.modes?.mouseTrackingMode || "none").trim().toLowerCase();
+  return mode || "none";
+}
+
+function hasTerminalScrollbackHistory(terminal) {
+  const baseY = Number(terminal?.buffer?.active?.baseY);
+  return Number.isFinite(baseY) && baseY > 0;
+}
+
+function shouldConsumeWheelWithoutInputForwarding(terminal) {
+  if (getTerminalMouseTrackingMode(terminal) !== "none") {
+    return false;
+  }
+
+  const activeBufferType = String(terminal?.buffer?.active?.type || "normal").toLowerCase();
+  const scrollback = Number(terminal?.options?.scrollback);
+  const scrollbackEnabled = Number.isFinite(scrollback) ? scrollback > 0 : true;
+  const hasScrollbackCapability =
+    activeBufferType !== "alternate"
+    && scrollbackEnabled
+    && hasTerminalScrollbackHistory(terminal);
+  return !hasScrollbackCapability;
+}
+
+function handleTerminalWheelScroll(event, pane) {
+  const terminal = pane?.terminal;
+  if (!event || !terminal) {
+    return true;
+  }
+
+  if (shouldConsumeWheelWithoutInputForwarding(terminal)) {
+    event.preventDefault();
+    return false;
+  }
+  return true;
+}
+
+function handleTerminalHostWheelCapture(event, pane) {
+  const handled = handleTerminalWheelScroll(event, pane);
+  if (handled === false) {
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    }
+  }
+  return handled;
+}
+
 export class TerminalPane {
   constructor({ panelId, host, sendMessage, onFocusChange }) {
     this.panelId = panelId;
@@ -200,6 +249,13 @@ export class TerminalPane {
       }
 
       return true;
+    });
+
+    this.terminal.attachCustomWheelEventHandler((event) => handleTerminalWheelScroll(event, this));
+    this.onTerminalHostWheelCapture = (event) => handleTerminalHostWheelCapture(event, this);
+    this.host.addEventListener("wheel", this.onTerminalHostWheelCapture, {
+      capture: true,
+      passive: false,
     });
 
     this.focusDisposable = this.terminal.onFocus(() => {
@@ -410,6 +466,9 @@ export class TerminalPane {
   }
 
   dispose() {
+    if (typeof this.onTerminalHostWheelCapture === "function") {
+      this.host.removeEventListener("wheel", this.onTerminalHostWheelCapture, true);
+    }
     this.host.removeEventListener("pointerdown", this.onPanelPointerDown);
     this.host.removeEventListener("transitionend", this.onTransitionEnd);
     window.removeEventListener("resize", this.onWindowResize);

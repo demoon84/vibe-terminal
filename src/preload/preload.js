@@ -6,6 +6,7 @@ const IPC_CHANNELS = Object.freeze({
   PTY_RESIZE: "pty:resize",
   PTY_KILL: "pty:kill",
   PTY_CHANGE_DIRECTORY: "pty:change-directory",
+
   PTY_DATA: "pty:data",
   PTY_EXIT: "pty:exit",
   PTY_STATUS: "pty:status",
@@ -21,8 +22,7 @@ const IPC_CHANNELS = Object.freeze({
   APP_PICK_FILES: "app:pick-files",
   APP_AGENT_INSTALL_STATUS: "app:agent-install-status",
   APP_AGENT_INSTALL_LATEST: "app:agent-install-latest",
-  APP_TMUX_STATUS: "app:tmux-status",
-  APP_TMUX_INSTALL: "app:tmux-install",
+
   APP_PWSH7_STATUS: "app:pwsh7-status",
   APP_PWSH7_INSTALL: "app:pwsh7-install",
   APP_NODE_RUNTIME_STATUS: "app:node-runtime-status",
@@ -33,6 +33,8 @@ const IPC_CHANNELS = Object.freeze({
   APP_CLIPBOARD_READ: "app:clipboard-read",
   APP_CLIPBOARD_IMAGE_TO_TEMP: "app:clipboard-image-to-temp",
   APP_CLIPBOARD_WRITE: "app:clipboard-write",
+  APP_QUERY_EDITORS: "app:query-editors",
+  APP_OPEN_IN_EDITOR: "app:open-in-editor",
 });
 
 function subscribe(channel, listener) {
@@ -81,8 +83,7 @@ const appApi = Object.freeze({
     checkAgentInstallStatus: (payload) =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_AGENT_INSTALL_STATUS, payload),
     installAgentLatest: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_AGENT_INSTALL_LATEST, payload),
-    checkTmuxStatus: () => ipcRenderer.invoke(IPC_CHANNELS.APP_TMUX_STATUS),
-    installTmux: () => ipcRenderer.invoke(IPC_CHANNELS.APP_TMUX_INSTALL),
+
     checkPowerShell7Status: () => ipcRenderer.invoke(IPC_CHANNELS.APP_PWSH7_STATUS),
     installPowerShell7: () => ipcRenderer.invoke(IPC_CHANNELS.APP_PWSH7_INSTALL),
     checkNodeRuntimeStatus: () => ipcRenderer.invoke(IPC_CHANNELS.APP_NODE_RUNTIME_STATUS),
@@ -91,6 +92,9 @@ const appApi = Object.freeze({
       ipcRenderer.invoke(IPC_CHANNELS.APP_TERMINAL_COLOR_DIAGNOSTICS),
     queryCodexModelCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.APP_CODEX_MODEL_CATALOG),
     queryGeminiModelCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.APP_GEMINI_MODEL_CATALOG),
+    queryEditors: () => ipcRenderer.invoke(IPC_CHANNELS.APP_QUERY_EDITORS),
+    openInEditor: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_IN_EDITOR, payload),
+    readAgentsPolicy: () => ipcRenderer.invoke(IPC_CHANNELS.APP_READ_AGENTS_POLICY),
   }),
 });
 
@@ -103,6 +107,7 @@ contextBridge.exposeInMainWorld(
       resize: (payload) => ipcRenderer.invoke(IPC_CHANNELS.PTY_RESIZE, payload),
       kill: (payload) => ipcRenderer.invoke(IPC_CHANNELS.PTY_KILL, payload),
       changeDirectory: (payload) => ipcRenderer.invoke(IPC_CHANNELS.PTY_CHANGE_DIRECTORY, payload),
+
       onData: (listener) => subscribe(IPC_CHANNELS.PTY_DATA, listener),
       onExit: (listener) => subscribe(IPC_CHANNELS.PTY_EXIT, listener),
       onStatus: (listener) => subscribe(IPC_CHANNELS.PTY_STATUS, listener),
@@ -128,8 +133,7 @@ contextBridge.exposeInMainWorld(
       pickFiles: (payload) => appApi.write.pickFiles(payload),
       checkAgentInstallStatus: (payload) => appApi.process.checkAgentInstallStatus(payload),
       installAgentLatest: (payload) => appApi.process.installAgentLatest(payload),
-      checkTmuxStatus: () => appApi.process.checkTmuxStatus(),
-      installTmux: () => appApi.process.installTmux(),
+
       checkPowerShell7Status: () => appApi.process.checkPowerShell7Status(),
       installPowerShell7: () => appApi.process.installPowerShell7(),
       checkNodeRuntimeStatus: () => appApi.process.checkNodeRuntimeStatus(),
@@ -137,6 +141,9 @@ contextBridge.exposeInMainWorld(
       queryTerminalColorDiagnostics: () => appApi.process.queryTerminalColorDiagnostics(),
       queryCodexModelCatalog: () => appApi.process.queryCodexModelCatalog(),
       queryGeminiModelCatalog: () => appApi.process.queryGeminiModelCatalog(),
+      queryEditors: () => appApi.process.queryEditors(),
+      openInEditor: (payload) => appApi.process.openInEditor(payload),
+      readAgentsPolicy: () => appApi.process.readAgentsPolicy(),
       readClipboardText: () => appApi.read.clipboardText(),
       readClipboardImageToTemp: () => appApi.read.clipboardImageToTemp(),
       writeClipboardText: (text) => appApi.write.clipboardText(text),

@@ -1,0 +1,5 @@
+
+> vibe-terminal-layout-system@1.0.2 electron:start
+> electron .
+
+/Users/demoon/Documents/project/vibe-terminal/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron exited with signal SIGTERM
