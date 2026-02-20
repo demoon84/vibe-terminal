@@ -2971,7 +2971,7 @@ function createMainWindow() {
   const windowOptions = {
     width: 1600,
     height: 1000,
-    minWidth: 1200,
+    minWidth: 1400,
     minHeight: 600,
     title: "Vibe Terminal",
     frame: false,
