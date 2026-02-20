@@ -2969,7 +2969,7 @@ function createMainWindow() {
   hasWindowCloseCleanupRun = false;
 
   const windowOptions = {
-    width: 1600,
+    width: 1400,
     height: 1000,
     minWidth: 1400,
     minHeight: 600,
