@@ -4,36 +4,24 @@
   "private": true,
   "main": "src/main/main.js",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
     "electron:start": "electron .",
-    "electron:dev": "nodemon --config nodemon.electron.json",
-    "electron:tmux": "bash scripts/run-electron-with-tmux.sh",
     "rebuild:native": "electron-builder install-app-deps",
     "package": "electron-builder --win portable",
     "package:installer": "electron-builder --win nsis",
     "package:dir": "electron-builder --win dir",
     "package:mac": "electron-builder --mac dmg",
     "package:mac:dir": "electron-builder --mac dir",
-    "check": "node scripts/check-syntax.js",
-    "security:deps": "node scripts/dependency-security-scan.js",
-    "test": "node --test",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "dotenv": "^17.2.4",
-    "express": "^4.21.2",
-    "file-icon": "^6.0.0",
-    "node-pty": "^1.0.0",
-    "ws": "^8.18.0"
+    "node-pty": "^1.0.0"
   },
   "devDependencies": {
     "@types/electron": "^1.4.38",
     "electron": "^30.0.0",
-    "electron-builder": "^26.7.0",
-    "nodemon": "^3.1.11"
+    "electron-builder": "^26.7.0"
   },
   "build": {
     "appId": "com.vibe-terminal.app",

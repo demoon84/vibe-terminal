@@ -1,6 +1,0 @@
-{
-  "watch": ["src/main"],
-  "ext": "js,json",
-  "exec": "electron .",
-  "delay": "150"
-}
