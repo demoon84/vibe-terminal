@@ -9,7 +9,7 @@
   --danger: #cf7f7f;
   --titlebar-height: 54px;
   --window-control-button-width: 48px;
-  --window-control-height-reduction: 3px;
+  --window-control-height-reduction: 6px;
   --window-controls-width: calc(var(--window-control-button-width) * 3);
   --titlebar-preset-btn-width: 54px;
   --titlebar-action-btn-width: 72px;
