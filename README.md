@@ -1,21 +1,23 @@
 # vibe-terminal-layout-system
 
-Electron-first multi-pane terminal for long-running agent workflows (Codex, Claude, Gemini), with tmux-based session orchestration and an optional legacy HTTP/WebSocket runtime.
+Electron-first multi-pane terminal for long-running agent workflows (Codex, Claude, Gemini), with PTY-based session management and an optional legacy HTTP/WebSocket runtime.
 
 ## Purpose
 
 This repository provides:
 
 - an Electron desktop app (`src/main`, `src/preload`, `src/renderer`)
-- PTY/tmux orchestration with layout presets
+- PTY-based panel/session orchestration with layout presets
 - agent CLI integration and runtime dependency checks
+- optional tmux-first launcher workflow
 - an optional legacy server runtime (`server/`)
 
 ## Key Features
 
 - Preset layouts: `1x2`, `1x4`, `2x6`, `2x8`, `3x12`
-- Layout/session managers keep visible panes mapped to PTY or tmux sessions
-- Startup checks/install helpers for `tmux`, PowerShell 7 (Windows), Node.js, and agent CLIs
+- Layout/session managers keep visible panes mapped to PTY sessions
+- Startup checks/install helpers for PowerShell 7 (Windows), Node.js, and agent CLIs
+- Optional tmux-first launcher (`npm run electron:tmux`)
 - GUI PATH augmentation for Homebrew, `~/.nvm`, `~/.volta`, and `~/.local/bin`
 - UTF-8 terminal locale fallback for stable prompt rendering
 - Hardened main/renderer boundary (sandboxed renderer, IPC validation/trust guards, clipboard rate limiting)
@@ -25,17 +27,6 @@ This repository provides:
 
 - Node.js 20+
 - npm
-- tmux (recommended for stable multi-session behavior)
-
-Install tmux:
-
-```bash
-# macOS
-brew install tmux
-
-# Windows
-winget install --id GnuWin32.Tmux --source winget -e
-```
 
 ## Install
 
@@ -57,7 +48,7 @@ Electron dev mode:
 npm run electron:dev
 ```
 
-tmux-first Electron launch:
+tmux-first Electron launch (optional):
 
 ```bash
 npm run electron:tmux
@@ -65,6 +56,14 @@ npm run electron:tmux
 
 - Default tmux session: `vibe-terminal-dev`
 - Override via env: `TMUX_SESSION_NAME=<name> npm run electron:tmux`
+- tmux is required only for this command.
+
+Install tmux when using `electron:tmux`:
+
+```bash
+# macOS
+brew install tmux
+```
 
 Legacy server runtime (optional):
 
@@ -155,8 +154,9 @@ Artifacts are generated under `release/`.
 
 ## Troubleshooting
 
-- `preset failed ... tmux unavailable ... ENOENT`
-  - Install tmux and relaunch.
+- `[error] tmux is required for the standard app session workflow.`
+  - This only applies to `npm run electron:tmux`.
+  - Install tmux, or use `npm run electron:start` / `npm run electron:dev`.
   - Verify with `command -v tmux`.
 - `Codex install failed: npm-not-found`
   - Confirm npm is installed (`npm -v`).
