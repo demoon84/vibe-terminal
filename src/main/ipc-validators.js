@@ -6,6 +6,7 @@ const MAX_PTY_WRITE_CHARS = 8192;
 const MAX_PATH_CHARS = 1024;
 const MAX_ENV_KEY_CHARS = 128;
 const MAX_ENV_VALUE_CHARS = 4096;
+const MAX_AGENTS_POLICY_CHARS = 2_000_000;
 
 const CAPABILITY_TOKEN_MIN_LENGTH = 16;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -272,11 +273,104 @@ function validateAgentCommandPayload(payload) {
   return { ok: true, value: { agentCommand } };
 }
 
+function validateSkillCatalogPayload(payload) {
+  if (payload === undefined) {
+    return { ok: true, value: { query: "" } };
+  }
+  if (!isPlainObject(payload)) {
+    return { ok: false, error: "invalid-payload" };
+  }
+
+  const query = asTrimmedString(payload.query);
+  if (query.length > 120) {
+    return { ok: false, error: "invalid-payload:query-too-long" };
+  }
+  return { ok: true, value: { query } };
+}
+
+function validateSkillInstallPayload(payload) {
+  if (!isPlainObject(payload)) {
+    return { ok: false, error: "invalid-payload" };
+  }
+
+  const skillName = asTrimmedString(payload.skillName).toLowerCase();
+  if (!skillName) {
+    return { ok: false, error: "invalid-payload:skillName" };
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(skillName)) {
+    return { ok: false, error: "invalid-payload:skillName-format" };
+  }
+
+  const installProvider = asTrimmedString(payload.installProvider).toLowerCase() || "curated";
+  if (installProvider !== "curated" && installProvider !== "skills-sh") {
+    return { ok: false, error: "invalid-payload:installProvider" };
+  }
+
+  const installRepo = asTrimmedString(payload.installRepo);
+  if (installRepo && !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(installRepo)) {
+    return { ok: false, error: "invalid-payload:installRepo-format" };
+  }
+  if (installProvider === "skills-sh" && !installRepo) {
+    return { ok: false, error: "invalid-payload:installRepo-required" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      skillName,
+      installProvider,
+      installRepo,
+    },
+  };
+}
+
+function validateSkillNamePayload(payload) {
+  if (!isPlainObject(payload)) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  const skillName = asTrimmedString(payload.skillName).toLowerCase();
+  if (!skillName) {
+    return { ok: false, error: "invalid-payload:skillName" };
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(skillName)) {
+    return { ok: false, error: "invalid-payload:skillName-format" };
+  }
+  return { ok: true, value: { skillName } };
+}
+
 function validateClipboardWritePayload(payload) {
   if (!isPlainObject(payload) || typeof payload.text !== "string") {
     return { ok: false, error: "invalid-payload" };
   }
   return { ok: true, value: { text: payload.text } };
+}
+
+function validateAgentsPolicyWritePayload(payload) {
+  if (!isPlainObject(payload) || typeof payload.content !== "string") {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (payload.content.length > MAX_AGENTS_POLICY_CHARS) {
+    return { ok: false, error: "invalid-payload:content-too-long" };
+  }
+
+  let baseMtimeMs = null;
+  if (payload.baseMtimeMs !== undefined && payload.baseMtimeMs !== null) {
+    const parsed = Number(payload.baseMtimeMs);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return { ok: false, error: "invalid-payload:baseMtimeMs" };
+    }
+    baseMtimeMs = parsed;
+  }
+
+  const ignoreStale = payload.ignoreStale === true;
+  return {
+    ok: true,
+    value: {
+      content: payload.content,
+      baseMtimeMs,
+      ignoreStale,
+    },
+  };
 }
 
 module.exports = {
@@ -289,5 +383,9 @@ module.exports = {
   validateLayoutSetPresetPayload,
   validatePathDialogPayload,
   validateAgentCommandPayload,
+  validateSkillCatalogPayload,
+  validateSkillInstallPayload,
+  validateSkillNamePayload,
   validateClipboardWritePayload,
+  validateAgentsPolicyWritePayload,
 };

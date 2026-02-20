@@ -1,6 +1,7 @@
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const { pathToFileURL } = require("url");
 const { spawn, spawnSync } = require("child_process");
 const { app, BrowserWindow, dialog, ipcMain, Menu, clipboard, shell } = require("electron");
 const pty = require("node-pty");
@@ -18,7 +19,11 @@ const {
 const {
   validatePathDialogPayload,
   validateAgentCommandPayload,
+  validateSkillCatalogPayload,
+  validateSkillInstallPayload,
+  validateSkillNamePayload,
   validateClipboardWritePayload,
+  validateAgentsPolicyWritePayload,
 } = require("./ipc-validators");
 
 const sessionManager = new SessionManager();
@@ -102,9 +107,68 @@ const AGENT_INSTALL_TARGETS = Object.freeze({
     docsUrl: "https://github.com/google-gemini/gemini-cli",
   }),
 });
+const CURATED_SKILL_REPO = "openai/skills";
+const CURATED_SKILL_PATH_PREFIX = "skills/.curated";
+const SKILLS_SH_API_BASE = String(process.env.SKILLS_API_URL || "https://skills.sh").trim()
+  || "https://skills.sh";
+const SKILLS_SH_SEARCH_LIMIT = 18;
+const SKILLS_SH_QUERY_MIN_LENGTH = 2;
+const SKILLS_SH_FETCH_TIMEOUT_MS = 8_000;
+const CURATED_ICON_TREE_CACHE_TTL_MS = 10 * 60 * 1000;
+const CURATED_ICON_TREE_TIMEOUT_MS = 8_000;
+const DEFAULT_SKILL_DESCRIPTION = "openai/skills에서 설치 가능한 스킬";
+const SKILL_DESCRIPTION_OVERRIDES = Object.freeze({
+  "cloudflare-deploy": "Cloudflare Workers/Pages 배포 자동화",
+  "develop-web-game": "웹 게임 개발 및 Playwright 테스트 루프",
+  doc: "문서 파일 편집 및 리뷰",
+  figma: "Figma MCP 기반 디자인-코드 작업",
+  "figma-implement-design": "Figma 디자인을 프로덕션 코드로 구현",
+  "gh-address-comments": "GitHub PR 리뷰 코멘트 반영",
+  "gh-fix-ci": "GitHub Actions CI 오류 디버깅",
+  imagegen: "OpenAI 이미지 생성/편집",
+  "jupyter-notebook": "실험용 Jupyter 노트북 생성",
+  linear: "Linear 이슈 조회 및 업데이트",
+  "netlify-deploy": "Netlify 사이트/함수 배포",
+  "notion-knowledge-capture": "Notion 지식 수집 및 정리",
+  "notion-meeting-intelligence": "회의 내용 요약과 액션 아이템 정리",
+  "notion-research-documentation": "리서치 문서 작성 및 정리",
+  "notion-spec-to-implementation": "스펙을 구현 계획으로 전환",
+  "openai-docs": "OpenAI 공식 문서 검색",
+  pdf: "PDF 문서 분석/요약",
+  playwright: "터미널에서 실제 브라우저 자동화",
+  "render-deploy": "Render 서비스 배포",
+  screenshot: "스크린샷 캡처/첨부 자동화",
+  "security-best-practices": "보안 베스트 프랙티스 점검",
+  "security-ownership-map": "보안 담당 영역 맵핑",
+  "security-threat-model": "변경사항 위협 모델링",
+  sentry: "Sentry 이슈 조사 및 해결",
+  sora: "Sora 기반 영상 생성/편집",
+  speech: "텍스트 음성 변환",
+  spreadsheet: "스프레드시트 분석/편집",
+  transcribe: "음성 전사 및 화자 분리",
+  "vercel-deploy": "Vercel 배포 자동화",
+  yeet: "빠른 초기 작업 보조",
+});
+const SECURITY_SHIELD_DATA_URI = "data:image/svg+xml," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none">'
+  + '<path d="M12 2L4 6v5c0 5.25 3.4 10.17 8 11.37C16.6 21.17 20 16.25 20 11V6l-8-4z" fill="rgba(255,255,255,0.85)"/>'
+  + '<path d="M10.5 14.5l-2-2 1-1 1 1 3.5-3.5 1 1-4.5 4.5z" fill="rgba(30,30,30,0.9)"/>'
+  + '</svg>',
+);
+const SKILL_ICON_OVERRIDES = Object.freeze({
+  "security-best-practices": SECURITY_SHIELD_DATA_URI,
+  "security-ownership-map": SECURITY_SHIELD_DATA_URI,
+  "security-threat-model": SECURITY_SHIELD_DATA_URI,
+});
 const TERMINAL_COLOR_MODE = String(process.env.VIBE_TERMINAL_COLOR_MODE || "force")
   .trim()
   .toLowerCase();
+let curatedSkillIconCache = {
+  fetchedAt: 0,
+  bySkill: new Map(),
+  ok: false,
+  error: null,
+};
 
 const PWSH7_MIN_REQUIRED_VERSION = "7.0.0";
 const PWSH7_INSTALL_PAGE_URL = "https://aka.ms/powershell-release?tag=stable";
@@ -437,6 +501,635 @@ function resolveNpmCommand() {
     }
   }
   return null;
+}
+
+function resolvePythonCommand() {
+  const candidates =
+    process.platform === "win32" ? ["python.exe", "python3.exe", "python", "python3"] : ["python3", "python"];
+  for (const candidate of candidates) {
+    const locations = getCommandLocations(candidate);
+    if (locations.length > 0) {
+      return locations[0];
+    }
+  }
+  return null;
+}
+
+function resolveNpxCommand() {
+  const candidates =
+    process.platform === "win32" ? ["npx.cmd", "npx", "npx.exe"] : ["npx"];
+  for (const candidate of candidates) {
+    const locations = getCommandLocations(candidate);
+    if (locations.length > 0) {
+      return locations[0];
+    }
+  }
+  return null;
+}
+
+function getCodexHomeDir() {
+  const configured = String(process.env.CODEX_HOME || "").trim();
+  if (configured) {
+    return configured;
+  }
+  return path.join(os.homedir(), ".codex");
+}
+
+function getCodexSkillsDir() {
+  return path.join(getCodexHomeDir(), "skills");
+}
+
+function getAgentsSkillsDir() {
+  return path.join(os.homedir(), ".agents", "skills");
+}
+
+function getSkillInstallerScriptsDir() {
+  return path.join(getCodexSkillsDir(), ".system", "skill-installer", "scripts");
+}
+
+function toSafeSkillName(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+    return "";
+  }
+  return normalized;
+}
+
+function toSafeRepositorySlug(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/);
+  if (!match || !match[1] || !match[2]) {
+    return "";
+  }
+  return `${match[1]}/${match[2]}`;
+}
+
+function normalizeSkillSearchQuery(value) {
+  return String(value || "").trim();
+}
+
+function normalizeSkillInstallProvider(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "skills-sh") {
+    return "skills-sh";
+  }
+  return "curated";
+}
+
+function isImageFileName(fileName) {
+  return /\.(svg|png|webp|jpg|jpeg)$/i.test(String(fileName || "").trim());
+}
+
+function toFileUrl(filePath) {
+  try {
+    return pathToFileURL(String(filePath || "")).toString();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function pickLocalSkillIconPath(skillDir) {
+  const assetsDir = path.join(String(skillDir || ""), "assets");
+  if (!fs.existsSync(assetsDir) || !fs.statSync(assetsDir).isDirectory()) {
+    return "";
+  }
+
+  const entries = fs.readdirSync(assetsDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => isImageFileName(name));
+  if (entries.length === 0) {
+    return "";
+  }
+
+  const priorityMatchers = [
+    /\.png$/i,
+    /\.(webp|jpg|jpeg)$/i,
+    /-small\.svg$/i,
+    /^icon\.svg$/i,
+    /\.svg$/i,
+  ];
+  for (const matcher of priorityMatchers) {
+    const found = entries.find((name) => matcher.test(name));
+    if (found) {
+      return path.join(assetsDir, found);
+    }
+  }
+
+  return path.join(assetsDir, entries[0]);
+}
+
+function parseCuratedIconTree(payload) {
+  const bySkill = new Map();
+  const tree = Array.isArray(payload?.tree) ? payload.tree : [];
+
+  const bucket = new Map();
+  for (const item of tree) {
+    if (item?.type !== "blob") {
+      continue;
+    }
+    const itemPath = String(item?.path || "");
+    const match = itemPath.match(/^skills\/\.curated\/([^/]+)\/assets\/(.+)$/);
+    if (!match || !match[1] || !match[2]) {
+      continue;
+    }
+    if (!isImageFileName(match[2])) {
+      continue;
+    }
+
+    const skillName = toSafeSkillName(match[1]);
+    if (!skillName) {
+      continue;
+    }
+
+    if (!bucket.has(skillName)) {
+      bucket.set(skillName, []);
+    }
+    bucket.get(skillName).push(match[2]);
+  }
+
+  const scoreFile = (name) => {
+    if (/\.png$/i.test(name)) {
+      return 1;
+    }
+    if (/\.(webp|jpg|jpeg)$/i.test(name)) {
+      return 2;
+    }
+    if (/-small\.svg$/i.test(name)) {
+      return 3;
+    }
+    if (/^icon\.svg$/i.test(name)) {
+      return 4;
+    }
+    if (/\.svg$/i.test(name)) {
+      return 5;
+    }
+    return 6;
+  };
+
+  for (const [skillName, names] of bucket.entries()) {
+    const sorted = [...names].sort((a, b) => {
+      const scoreDiff = scoreFile(a) - scoreFile(b);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return a.localeCompare(b, "en");
+    });
+    if (sorted.length > 0) {
+      bySkill.set(skillName, sorted[0]);
+    }
+  }
+
+  return bySkill;
+}
+
+function buildCuratedRawAssetUrl(skillName, assetFileName) {
+  const normalizedSkillName = toSafeSkillName(skillName);
+  const fileName = String(assetFileName || "").trim();
+  if (!normalizedSkillName || !fileName || !isImageFileName(fileName)) {
+    return "";
+  }
+  return `https://raw.githubusercontent.com/${CURATED_SKILL_REPO}/main/skills/.curated/${normalizedSkillName}/assets/${encodeURIComponent(fileName)}`;
+}
+
+async function queryCuratedSkillIconMap() {
+  const now = Date.now();
+  if (
+    curatedSkillIconCache.bySkill instanceof Map
+    && now - curatedSkillIconCache.fetchedAt < CURATED_ICON_TREE_CACHE_TTL_MS
+  ) {
+    return curatedSkillIconCache;
+  }
+
+  let url = null;
+  try {
+    url = new URL(`/repos/${CURATED_SKILL_REPO}/git/trees/main?recursive=1`, "https://api.github.com");
+  } catch (_error) {
+    return {
+      fetchedAt: now,
+      bySkill: new Map(),
+      ok: false,
+      error: "curated-icon-url-invalid",
+    };
+  }
+
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => {
+      controller.abort();
+    }, CURATED_ICON_TREE_TIMEOUT_MS)
+    : null;
+
+  try {
+    if (typeof fetch !== "function") {
+      throw new Error("fetch-not-available");
+    }
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/vnd.github+json",
+      },
+      signal: controller?.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`http-${response.status}`);
+    }
+    const payload = await response.json();
+    curatedSkillIconCache = {
+      fetchedAt: now,
+      bySkill: parseCuratedIconTree(payload),
+      ok: true,
+      error: null,
+    };
+    return curatedSkillIconCache;
+  } catch (error) {
+    const aborted = error?.name === "AbortError";
+    curatedSkillIconCache = {
+      fetchedAt: now,
+      bySkill: new Map(),
+      ok: false,
+      error: aborted ? "curated-icon-timeout" : `curated-icon-fetch-failed:${String(error)}`,
+    };
+    return curatedSkillIconCache;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function getSkillsShOwnerAvatarUrl(installRepo) {
+  const repository = toSafeRepositorySlug(installRepo);
+  if (!repository) {
+    return "";
+  }
+  const owner = repository.split("/")[0];
+  if (!owner) {
+    return "";
+  }
+  return `https://github.com/${owner}.png?size=64`;
+}
+
+function formatSkillDisplayName(skillName) {
+  const normalized = toSafeSkillName(skillName);
+  if (!normalized) {
+    return "";
+  }
+  return normalized
+    .split("-")
+    .map((part) => (part.length > 0 ? `${part[0].toUpperCase()}${part.slice(1)}` : part))
+    .join(" ");
+}
+
+function parseSkillMetadata(skillFilePath) {
+  const stripWrappingQuotes = (value) => {
+    const text = String(value || "").trim();
+    if (text.length < 2) {
+      return text;
+    }
+    const first = text[0];
+    const last = text[text.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'")) {
+      return text.slice(1, -1).trim();
+    }
+    return text;
+  };
+
+  try {
+    if (!skillFilePath || !fs.existsSync(skillFilePath)) {
+      return {
+        name: null,
+        description: null,
+      };
+    }
+
+    const content = fs.readFileSync(skillFilePath, "utf8");
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    const frontmatter = frontmatterMatch?.[1] || "";
+    const nameMatch = frontmatter.match(/(?:^|\n)name:\s*(.+)\s*$/m);
+    const descriptionMatch = frontmatter.match(/(?:^|\n)description:\s*(.+)\s*$/m);
+
+    return {
+      name: stripWrappingQuotes(nameMatch?.[1]) || null,
+      description: stripWrappingQuotes(descriptionMatch?.[1]) || null,
+    };
+  } catch (_error) {
+    return {
+      name: null,
+      description: null,
+    };
+  }
+}
+
+function listSkillDirs(baseDir, options = {}) {
+  if (!baseDir || !fs.existsSync(baseDir)) {
+    return [];
+  }
+
+  const {
+    includeHidden = false,
+    excludeNames = [],
+  } = options;
+  const exclude = new Set(
+    (excludeNames || []).map((value) => String(value || "").trim()).filter((value) => value.length > 0),
+  );
+
+  const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+  const skills = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const name = String(entry.name || "").trim();
+    if (!name) {
+      continue;
+    }
+    if (!includeHidden && name.startsWith(".")) {
+      continue;
+    }
+    if (exclude.has(name)) {
+      continue;
+    }
+
+    const normalized = toSafeSkillName(name);
+    if (!normalized) {
+      continue;
+    }
+
+    const skillDir = path.join(baseDir, name);
+    const skillFilePath = path.join(skillDir, "SKILL.md");
+    if (!fs.existsSync(skillFilePath)) {
+      continue;
+    }
+
+    const metadata = parseSkillMetadata(skillFilePath);
+    const description =
+      SKILL_DESCRIPTION_OVERRIDES[normalized]
+      || metadata.description
+      || DEFAULT_SKILL_DESCRIPTION;
+    const displayName = metadata.name || formatSkillDisplayName(normalized) || normalized;
+    const localIconPath = pickLocalSkillIconPath(skillDir);
+
+    skills.push({
+      name: normalized,
+      displayName,
+      description,
+      path: skillDir,
+      iconUrl: localIconPath ? toFileUrl(localIconPath) : "",
+    });
+  }
+
+  return skills;
+}
+
+function parseCuratedSkillListResult(stdout) {
+  try {
+    const parsed = JSON.parse(String(stdout || "[]"));
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    const rows = [];
+    for (const row of parsed) {
+      const name = toSafeSkillName(row?.name);
+      if (!name) {
+        continue;
+      }
+      rows.push({
+        name,
+        installed: Boolean(row?.installed),
+      });
+    }
+    return rows;
+  } catch (_error) {
+    return [];
+  }
+}
+
+function queryCuratedSkillRows() {
+  const python = resolvePythonCommand();
+  const scriptPath = path.join(getSkillInstallerScriptsDir(), "list-skills.py");
+  if (!python || !fs.existsSync(scriptPath)) {
+    return {
+      ok: false,
+      error: "skill-list-script-not-found",
+      rows: [],
+      stdout: "",
+      stderr: "",
+    };
+  }
+
+  const result = spawnSync(python, [scriptPath, "--format", "json"], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: withAugmentedPath(process.env),
+  });
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  const rows = parseCuratedSkillListResult(stdout);
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      error: `skill-list-exit-${result.status}`,
+      rows,
+      stdout: trimTail(stdout),
+      stderr: trimTail(stderr),
+    };
+  }
+
+  return {
+    ok: true,
+    rows,
+    stdout: trimTail(stdout),
+    stderr: trimTail(stderr),
+  };
+}
+
+function parseSkillsShIdentifier(value) {
+  const parts = String(value || "")
+    .trim()
+    .split("/")
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+  if (parts.length < 3) {
+    return {
+      repo: "",
+      skillId: "",
+    };
+  }
+
+  const repo = toSafeRepositorySlug(`${parts[0]}/${parts[1]}`);
+  const skillId = toSafeSkillName(parts.slice(2).join("-"));
+  return {
+    repo,
+    skillId,
+  };
+}
+
+function normalizeSkillsShSlug(value) {
+  const parts = String(value || "")
+    .trim()
+    .split("/")
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+  if (parts.length < 3) {
+    return "";
+  }
+
+  const owner = parts[0];
+  const repo = parts[1];
+  const skill = parts.slice(2).join("/");
+  if (!/^[A-Za-z0-9._-]+$/.test(owner) || !/^[A-Za-z0-9._-]+$/.test(repo)) {
+    return "";
+  }
+  if (!skill) {
+    return "";
+  }
+  return `${owner}/${repo}/${skill}`;
+}
+
+function buildSkillsShOpenGraphImageUrl(slug) {
+  const normalized = normalizeSkillsShSlug(slug);
+  if (!normalized) {
+    return "";
+  }
+
+  const parts = normalized.split("/");
+  const owner = parts[0];
+  const repo = parts[1];
+  const skill = parts.slice(2).join("/");
+  return `https://skills.sh/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(skill)}/opengraph-image`;
+}
+
+function parseSkillsShSearchResult(payload) {
+  if (!payload || !Array.isArray(payload.skills)) {
+    return [];
+  }
+
+  const rows = [];
+  for (const skill of payload.skills) {
+    const parsedId = parseSkillsShIdentifier(skill?.id);
+    const slug = normalizeSkillsShSlug(skill?.id);
+    const repository = toSafeRepositorySlug(skill?.source) || parsedId.repo;
+    const skillName = toSafeSkillName(skill?.skillId || parsedId.skillId || skill?.name);
+    if (!repository || !skillName) {
+      continue;
+    }
+
+    const displayName = String(skill?.name || skillName).trim()
+      || formatSkillDisplayName(skillName)
+      || skillName;
+    const installs = Number.parseInt(String(skill?.installs || "0"), 10);
+    const fallbackIconUrl = getSkillsShOwnerAvatarUrl(repository);
+    const iconUrl = buildSkillsShOpenGraphImageUrl(slug);
+    rows.push({
+      name: skillName,
+      displayName,
+      description: `${repository} · skills.sh 검색 결과`,
+      installProvider: "skills-sh",
+      installRepo: repository,
+      installs: Number.isFinite(installs) && installs > 0 ? installs : 0,
+      iconUrl: iconUrl || fallbackIconUrl,
+      iconFallbackUrl: fallbackIconUrl,
+    });
+  }
+
+  return rows;
+}
+
+async function querySkillsShRows(query, limit = SKILLS_SH_SEARCH_LIMIT) {
+  const normalizedQuery = normalizeSkillSearchQuery(query);
+  if (normalizedQuery.length < SKILLS_SH_QUERY_MIN_LENGTH) {
+    return {
+      ok: true,
+      skipped: true,
+      query: normalizedQuery,
+      rows: [],
+      error: null,
+    };
+  }
+
+  let url = null;
+  try {
+    url = new URL("/api/search", SKILLS_SH_API_BASE);
+  } catch (_error) {
+    return {
+      ok: false,
+      skipped: false,
+      query: normalizedQuery,
+      rows: [],
+      error: "skills-sh-invalid-api-base",
+    };
+  }
+
+  url.searchParams.set("q", normalizedQuery);
+  url.searchParams.set("limit", String(limit));
+
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => {
+      controller.abort();
+    }, SKILLS_SH_FETCH_TIMEOUT_MS)
+    : null;
+  try {
+    if (typeof fetch !== "function") {
+      return {
+        ok: false,
+        skipped: false,
+        query: normalizedQuery,
+        rows: [],
+        error: "skills-sh-fetch-unavailable",
+      };
+    }
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller?.signal,
+    });
+    const bodyText = String(await response.text() || "");
+    let parsed = null;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch (_error) {
+      parsed = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        skipped: false,
+        query: normalizedQuery,
+        rows: [],
+        error: `skills-sh-http-${response.status}`,
+        body: trimTail(bodyText),
+      };
+    }
+
+    return {
+      ok: true,
+      skipped: false,
+      query: normalizedQuery,
+      rows: parseSkillsShSearchResult(parsed),
+      error: null,
+    };
+  } catch (error) {
+    const aborted = error?.name === "AbortError";
+    return {
+      ok: false,
+      skipped: false,
+      query: normalizedQuery,
+      rows: [],
+      error: aborted ? "skills-sh-timeout" : `skills-sh-fetch-failed:${String(error)}`,
+    };
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function buildTerminalDiagnosticEnv(extraEnv = {}) {
@@ -1273,6 +1966,10 @@ function buildAgentInstallCommand(target) {
   return `npm install -g ${target.packageName}@latest`;
 }
 
+function buildAgentUninstallCommand(target) {
+  return `npm uninstall -g ${target.packageName}`;
+}
+
 function ensureTempClipboardDir() {
   const baseDir = path.join(os.tmpdir(), "vibe-terminal", "clipboard");
   fs.mkdirSync(baseDir, { recursive: true });
@@ -1322,6 +2019,7 @@ function getAgentInstallStatus(agentCommand) {
     installed,
     packageName: target.packageName,
     installCommand: buildAgentInstallCommand(target),
+    uninstallCommand: buildAgentUninstallCommand(target),
     npmUrl: target.npmUrl,
     docsUrl: target.docsUrl,
   };
@@ -1372,6 +2070,7 @@ function installAgentLatest(agentCommand) {
         label: target.label,
         packageName: target.packageName,
         installCommand: buildAgentInstallCommand(target),
+        uninstallCommand: buildAgentUninstallCommand(target),
         npmUrl: target.npmUrl,
         docsUrl: target.docsUrl,
         stdout: trimTail(stdout),
@@ -1436,6 +2135,531 @@ function installAgentLatest(agentCommand) {
       });
     });
   });
+}
+
+function uninstallAgent(agentCommand) {
+  return new Promise((resolve) => {
+    const target = getAgentInstallTarget(agentCommand);
+    if (!target) {
+      resolve({
+        ok: false,
+        error: "unsupported-agent",
+      });
+      return;
+    }
+
+    const npmCommand = resolveNpmCommand();
+    if (!npmCommand) {
+      resolve({
+        ok: false,
+        error: "npm-not-found",
+        uninstallCommand: buildAgentUninstallCommand(target),
+      });
+      return;
+    }
+
+    const npmArgs = ["uninstall", "-g", target.packageName];
+    let stdout = "";
+    let stderr = "";
+    let resolved = false;
+
+    const finish = (payload) => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      resolve({
+        ...payload,
+        agentCommand: target.id,
+        label: target.label,
+        packageName: target.packageName,
+        installCommand: buildAgentInstallCommand(target),
+        uninstallCommand: buildAgentUninstallCommand(target),
+        npmUrl: target.npmUrl,
+        docsUrl: target.docsUrl,
+        stdout: trimTail(stdout),
+        stderr: trimTail(stderr),
+      });
+    };
+
+    let child = null;
+    try {
+      child = spawn(npmCommand, npmArgs, {
+        cwd: app.getPath("home"),
+        env: withAugmentedPath(process.env),
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({
+        ok: false,
+        error: `spawn-failed:${String(error)}`,
+      });
+      return;
+    }
+
+    child.stdout?.on("data", (chunk) => {
+      stdout = trimTail(`${stdout}${String(chunk || "")}`);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = trimTail(`${stderr}${String(chunk || "")}`);
+    });
+
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        error: `spawn-error:${String(error)}`,
+      });
+    });
+
+    child.on("close", (code) => {
+      const installed = isExecutableAvailable(target.executable);
+      if (code === 0 && !installed) {
+        finish({
+          ok: true,
+          installed: false,
+          action: "uninstalled",
+        });
+        return;
+      }
+
+      if (code === 0 && installed) {
+        finish({
+          ok: false,
+          error: "still-installed",
+          installed: true,
+        });
+        return;
+      }
+
+      finish({
+        ok: false,
+        error: `npm-exit-${code}`,
+        installed,
+      });
+    });
+  });
+}
+
+async function getSkillCatalog(options = {}) {
+  const query = normalizeSkillSearchQuery(options?.query);
+  const codexSkillsDir = getCodexSkillsDir();
+  const agentsSkillsDir = getAgentsSkillsDir();
+  const codexInstalledSkills = listSkillDirs(codexSkillsDir, {
+    includeHidden: false,
+    excludeNames: [".system"],
+  });
+  const agentsInstalledSkills = listSkillDirs(agentsSkillsDir, {
+    includeHidden: false,
+  });
+  const curated = queryCuratedSkillRows();
+  const curatedIcons = await queryCuratedSkillIconMap();
+  const skillsSh = await querySkillsShRows(query);
+  const getCuratedIconUrl = (skillName) => {
+    const fileName = curatedIcons.bySkill.get(toSafeSkillName(skillName));
+    return buildCuratedRawAssetUrl(skillName, fileName);
+  };
+
+  const SKILLS_SH_TOP_ALL_TIME = [
+    { name: "find-skills", repo: "vercel-labs/skills", installs: 271900 },
+    { name: "vercel-react-best-practices", repo: "vercel-labs/agent-skills", installs: 149200 },
+    { name: "web-design-guidelines", repo: "vercel-labs/agent-skills", installs: 112800 },
+    { name: "remotion-best-practices", repo: "remotion-dev/skills", installs: 100200 },
+    { name: "frontend-design", repo: "anthropics/skills", installs: 82900 },
+    { name: "vercel-composition-patterns", repo: "vercel-labs/agent-skills", installs: 48500 },
+    { name: "agent-browser", repo: "vercel-labs/agent-browser", installs: 47000 },
+    { name: "typescript-design-patterns", repo: "vercel-labs/agent-skills", installs: 40100 },
+    { name: "vercel-ai-sdk-best-practices", repo: "vercel-labs/agent-skills", installs: 38200 },
+    { name: "git-commit-guidelines", repo: "anthropics/skills", installs: 35000 },
+    { name: "error-handling-patterns", repo: "wshobson/agents", installs: 3500 },
+    { name: "backlink-analyzer", repo: "aaron-he-zhu/seo-geo-claude-skills", installs: 2600 },
+    { name: "session-handoff", repo: "softaworks/agent-toolkit", installs: 2100 },
+    { name: "baoyu-markdown-to-html", repo: "jimliu/baoyu-skills", installs: 1800 },
+    { name: "gdpr-data-handling", repo: "wshobson/agents", installs: 1800 },
+    { name: "on-call-handoff-patterns", repo: "wshobson/agents", installs: 1600 },
+    { name: "security-audit-patterns", repo: "wshobson/agents", installs: 1500 },
+    { name: "api-integration-patterns", repo: "wshobson/agents", installs: 1400 },
+    { name: "database-schema-patterns", repo: "wshobson/agents", installs: 1200 },
+    { name: "testing-patterns", repo: "wshobson/agents", installs: 1100 }
+  ];
+
+  const byKey = new Map();
+  const installedByName = new Map();
+  const pushSkill = (key, skill) => {
+    if (!key || !skill || byKey.has(key)) {
+      return;
+    }
+    byKey.set(key, skill);
+  };
+
+  for (const local of codexInstalledSkills) {
+    const skill = {
+      name: local.name,
+      displayName: local.displayName || formatSkillDisplayName(local.name) || local.name,
+      description: local.description || DEFAULT_SKILL_DESCRIPTION,
+      installed: true,
+      recommended: false,
+      removable: true,
+      source: "codex",
+      installProvider: null,
+      installRepo: "",
+      installs: 0,
+      iconUrl: String(local.iconUrl || ""),
+      iconFallbackUrl: "",
+    };
+    pushSkill(`codex:${local.name}`, skill);
+    installedByName.set(local.name, skill);
+  }
+
+  for (const local of agentsInstalledSkills) {
+    if (installedByName.has(local.name)) {
+      continue;
+    }
+    const skill = {
+      name: local.name,
+      displayName: local.displayName || formatSkillDisplayName(local.name) || local.name,
+      description: local.description || DEFAULT_SKILL_DESCRIPTION,
+      installed: true,
+      recommended: false,
+      removable: false,
+      source: "agents",
+      installProvider: null,
+      installRepo: "",
+      installs: 0,
+      iconUrl: String(local.iconUrl || ""),
+      iconFallbackUrl: "",
+    };
+    pushSkill(`agents:${local.name}`, skill);
+    installedByName.set(local.name, skill);
+  }
+
+  for (const row of curated.rows) {
+    const name = toSafeSkillName(row?.name);
+    if (!name) {
+      continue;
+    }
+    const installedSkill = installedByName.get(name);
+    if (installedSkill) {
+      installedSkill.recommended = true;
+      const curatedUrl = getCuratedIconUrl(name) || SKILL_ICON_OVERRIDES[name] || "";
+      if (curatedUrl) {
+        installedSkill.iconFallbackUrl = installedSkill.iconUrl || "";
+        installedSkill.iconUrl = curatedUrl;
+      }
+      continue;
+    }
+    pushSkill(`curated:${name}`, {
+      name,
+      displayName: formatSkillDisplayName(name) || name,
+      description: SKILL_DESCRIPTION_OVERRIDES[name] || DEFAULT_SKILL_DESCRIPTION,
+      installed: false,
+      recommended: true,
+      removable: false,
+      source: "curated",
+      installProvider: "curated",
+      installRepo: CURATED_SKILL_REPO,
+      installs: 0,
+      iconUrl: getCuratedIconUrl(name) || SKILL_ICON_OVERRIDES[name] || "",
+      iconFallbackUrl: "",
+    });
+  }
+
+  const skillsShRowsToRender = skillsSh.skipped
+    ? SKILLS_SH_TOP_ALL_TIME.map(s => ({
+      ...s,
+      installRepo: s.repo,
+      iconUrl: buildSkillsShOpenGraphImageUrl(`${s.repo}/${s.name}`),
+      iconFallbackUrl: getSkillsShOwnerAvatarUrl(s.repo)
+    }))
+    : skillsSh.rows;
+
+  let addedMockCount = 0;
+
+  for (const row of skillsShRowsToRender) {
+    const name = toSafeSkillName(row?.name);
+    const installRepo = toSafeRepositorySlug(row?.installRepo);
+    if (!name || !installRepo || installedByName.has(name)) {
+      continue;
+    }
+    const isMock = skillsSh.skipped;
+
+    if (isMock) {
+      if (addedMockCount >= 10) continue;
+      addedMockCount++;
+    }
+
+    const descText = isMock ? `${installRepo} · skills.sh 역대 설치 상위 스킬` : `${installRepo} · skills.sh 검색 결과`;
+    pushSkill(`skills-sh:${installRepo}:${name}`, {
+      name,
+      displayName: String(row.displayName || formatSkillDisplayName(name) || name),
+      description: String(row.description || descText),
+      installed: false,
+      recommended: true,
+      removable: false,
+      source: "skills-sh",
+      installProvider: "skills-sh",
+      installRepo,
+      installs: Number.isFinite(row?.installs) ? Math.max(0, row.installs) : 0,
+      iconUrl: String(row?.iconUrl || getSkillsShOwnerAvatarUrl(installRepo)),
+      iconFallbackUrl: String(row?.iconFallbackUrl || getSkillsShOwnerAvatarUrl(installRepo)),
+    });
+  }
+
+  const skills = [...byKey.values()].sort((a, b) =>
+    String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), "ko"),
+  );
+  const installedSkills = skills.filter((skill) => skill.installed);
+  const recommendedSkills = skills.filter((skill) => !skill.installed && skill.recommended);
+
+  return {
+    ok: true,
+    curatedSourceOk: curated.ok,
+    curatedError: curated.ok ? null : curated.error,
+    curatedIconSourceOk: curatedIcons.ok,
+    curatedIconError: curatedIcons.ok ? null : curatedIcons.error,
+    skillsShSourceOk: skillsSh.ok,
+    skillsShError: skillsSh.ok ? null : skillsSh.error,
+    skillsShQuery: skillsSh.query || query,
+    installedSkills,
+    recommendedSkills,
+    skills,
+  };
+}
+
+function installCuratedSkill(skillName) {
+  const normalized = toSafeSkillName(skillName);
+  if (!normalized) {
+    return {
+      ok: false,
+      error: "invalid-skill-name",
+    };
+  }
+
+  const installedPath = path.join(getCodexSkillsDir(), normalized);
+  if (fs.existsSync(installedPath)) {
+    return {
+      ok: true,
+      skillName: normalized,
+      action: "already-installed",
+    };
+  }
+
+  const curated = queryCuratedSkillRows();
+  const supported = curated.rows.some((row) => row.name === normalized);
+  if (!supported) {
+    return {
+      ok: false,
+      error: curated.ok ? "unsupported-skill" : "curated-source-unavailable",
+      skillName: normalized,
+    };
+  }
+
+  const python = resolvePythonCommand();
+  const scriptPath = path.join(getSkillInstallerScriptsDir(), "install-skill-from-github.py");
+  if (!python || !fs.existsSync(scriptPath)) {
+    return {
+      ok: false,
+      error: "skill-install-script-not-found",
+      skillName: normalized,
+    };
+  }
+
+  const result = spawnSync(
+    python,
+    [
+      scriptPath,
+      "--repo",
+      CURATED_SKILL_REPO,
+      "--path",
+      `${CURATED_SKILL_PATH_PREFIX}/${normalized}`,
+    ],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      env: withAugmentedPath(process.env),
+      cwd: app.getPath("home"),
+    },
+  );
+  const stdout = trimTail(String(result.stdout || ""));
+  const stderr = trimTail(String(result.stderr || ""));
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      error: `skill-install-exit-${result.status}`,
+      skillName: normalized,
+      stdout,
+      stderr,
+    };
+  }
+
+  const installed = fs.existsSync(installedPath);
+  if (!installed) {
+    return {
+      ok: false,
+      error: "skill-install-finished-but-missing",
+      skillName: normalized,
+      stdout,
+      stderr,
+    };
+  }
+
+  return {
+    ok: true,
+    skillName: normalized,
+    action: "installed",
+    stdout,
+    stderr,
+  };
+}
+
+function installSkillsShSkill(skillName, installRepo) {
+  const normalized = toSafeSkillName(skillName);
+  const repository = toSafeRepositorySlug(installRepo);
+  if (!normalized) {
+    return {
+      ok: false,
+      error: "invalid-skill-name",
+    };
+  }
+  if (!repository) {
+    return {
+      ok: false,
+      error: "invalid-install-repo",
+      skillName: normalized,
+    };
+  }
+
+  const installedPath = path.join(getCodexSkillsDir(), normalized);
+  if (fs.existsSync(installedPath)) {
+    return {
+      ok: true,
+      skillName: normalized,
+      action: "already-installed",
+    };
+  }
+
+  const npxCommand = resolveNpxCommand();
+  if (!npxCommand) {
+    return {
+      ok: false,
+      error: "skills-cli-not-found",
+      skillName: normalized,
+    };
+  }
+
+  const result = spawnSync(
+    npxCommand,
+    [
+      "-y",
+      "skills",
+      "add",
+      repository,
+      "--skill",
+      normalized,
+      "--agent",
+      "codex",
+      "--global",
+      "--yes",
+    ],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      env: withAugmentedPath(process.env),
+      cwd: app.getPath("home"),
+    },
+  );
+  const stdout = trimTail(String(result.stdout || ""));
+  const stderr = trimTail(String(result.stderr || ""));
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      error: `skills-install-exit-${result.status}`,
+      skillName: normalized,
+      stdout,
+      stderr,
+    };
+  }
+
+  const installed = fs.existsSync(installedPath);
+  if (!installed) {
+    return {
+      ok: false,
+      error: "skills-install-finished-but-missing",
+      skillName: normalized,
+      stdout,
+      stderr,
+    };
+  }
+
+  return {
+    ok: true,
+    skillName: normalized,
+    action: "installed",
+    stdout,
+    stderr,
+  };
+}
+
+function installSkill(payload = {}) {
+  const normalized = toSafeSkillName(payload.skillName);
+  const installProvider = normalizeSkillInstallProvider(payload.installProvider);
+  const installRepo = toSafeRepositorySlug(payload.installRepo);
+  if (!normalized) {
+    return {
+      ok: false,
+      error: "invalid-skill-name",
+    };
+  }
+
+  if (installProvider === "skills-sh") {
+    return installSkillsShSkill(normalized, installRepo);
+  }
+
+  return installCuratedSkill(normalized);
+}
+
+function uninstallSkill(skillName) {
+  const normalized = toSafeSkillName(skillName);
+  if (!normalized) {
+    return {
+      ok: false,
+      error: "invalid-skill-name",
+    };
+  }
+
+  const codexPath = path.join(getCodexSkillsDir(), normalized);
+  const agentsPath = path.join(getAgentsSkillsDir(), normalized);
+  const installedInCodex = fs.existsSync(codexPath);
+  const installedInAgents = fs.existsSync(agentsPath);
+
+  if (!installedInCodex) {
+    return {
+      ok: false,
+      error: installedInAgents ? "managed-skill" : "not-installed",
+      skillName: normalized,
+    };
+  }
+
+  try {
+    fs.rmSync(codexPath, {
+      recursive: true,
+      force: false,
+      maxRetries: 2,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: `skill-uninstall-failed:${String(error)}`,
+      skillName: normalized,
+    };
+  }
+
+  return {
+    ok: true,
+    skillName: normalized,
+    action: "uninstalled",
+  };
 }
 
 function resolveGeminiCliCoreModulePath() {
@@ -1945,7 +3169,7 @@ app.whenReady().then(() => {
     const result = await dialog.showOpenDialog(window, {
       title: "작업 폴더 선택",
       defaultPath,
-      properties: ["openDirectory", "dontAddToRecent"],
+      properties: ["openDirectory", "createDirectory", "dontAddToRecent"],
     });
 
     if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
@@ -2040,6 +3264,74 @@ app.whenReady().then(() => {
       };
     }
     return installAgentLatest(validated.value.agentCommand);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_AGENT_UNINSTALL, async (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    const validated = validateAgentCommandPayload(payload);
+    if (!validated.ok) {
+      return {
+        ok: false,
+        error: validated.error,
+      };
+    }
+    return uninstallAgent(validated.value.agentCommand);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_SKILL_CATALOG, async (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    const validated = validateSkillCatalogPayload(payload);
+    if (!validated.ok) {
+      return {
+        ok: false,
+        error: validated.error,
+      };
+    }
+    return getSkillCatalog(validated.value);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_SKILL_INSTALL, (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    const validated = validateSkillInstallPayload(payload);
+    if (!validated.ok) {
+      return {
+        ok: false,
+        error: validated.error,
+      };
+    }
+    return installSkill(validated.value);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_SKILL_UNINSTALL, (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    const validated = validateSkillNamePayload(payload);
+    if (!validated.ok) {
+      return {
+        ok: false,
+        error: validated.error,
+      };
+    }
+    return uninstallSkill(validated.value.skillName);
   });
 
 
@@ -2180,21 +3472,111 @@ app.whenReady().then(() => {
     return openInEditor(editorId, cwd);
   });
 
-  ipcMain.handle("app:read-agents-policy", (event) => {
+  function resolveAgentsPolicyPath() {
+    return path.join(app.getPath("userData"), "AGENTS.md");
+  }
+
+  function prepareAgentsPolicyPath() {
+    const userDataPolicyPath = resolveAgentsPolicyPath();
+    const userDataDir = path.dirname(userDataPolicyPath);
+    const appPolicyPath = path.join(app.getAppPath(), "AGENTS.md");
+    const fallbackPath = path.join(process.cwd(), "AGENTS.md");
+
+    if (!fs.existsSync(userDataDir)) {
+      fs.mkdirSync(userDataDir, { recursive: true });
+    }
+
+    if (!fs.existsSync(userDataPolicyPath)) {
+      if (fs.existsSync(appPolicyPath)) {
+        fs.copyFileSync(appPolicyPath, userDataPolicyPath);
+      } else if (fs.existsSync(fallbackPath)) {
+        fs.copyFileSync(fallbackPath, userDataPolicyPath);
+      } else {
+        fs.writeFileSync(userDataPolicyPath, "", "utf-8");
+      }
+    }
+
+    return userDataPolicyPath;
+  }
+
+  function getFileMtimeMs(filePath) {
+    try {
+      const stat = fs.statSync(filePath);
+      return Number.isFinite(stat?.mtimeMs) ? stat.mtimeMs : 0;
+    } catch (_error) {
+      return 0;
+    }
+  }
+
+  ipcMain.handle(IPC_CHANNELS.APP_READ_AGENTS_POLICY, (event) => {
     if (!isTrustedRendererEvent(event)) {
       return { ok: false, error: "forbidden" };
     }
     try {
-      const policyPath = path.join(app.getAppPath(), "AGENTS.md");
-      if (fs.existsSync(policyPath)) {
-        return { ok: true, content: fs.readFileSync(policyPath, "utf-8") };
-      }
-      // Packaged app might have it outside app.asar, check process.cwd() fallback
-      const fallbackPath = path.join(process.cwd(), "AGENTS.md");
-      if (fs.existsSync(fallbackPath)) {
-        return { ok: true, content: fs.readFileSync(fallbackPath, "utf-8") };
+      const userDataPolicyPath = prepareAgentsPolicyPath();
+      if (fs.existsSync(userDataPolicyPath)) {
+        return {
+          ok: true,
+          content: fs.readFileSync(userDataPolicyPath, "utf-8"),
+          path: userDataPolicyPath,
+          mtimeMs: getFileMtimeMs(userDataPolicyPath),
+        };
       }
       return { ok: true, content: null };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_WRITE_AGENTS_POLICY, (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return { ok: false, error: "forbidden" };
+    }
+    const validated = validateAgentsPolicyWritePayload(payload);
+    if (!validated.ok) {
+      return { ok: false, error: validated.error };
+    }
+    try {
+      const userDataPolicyPath = prepareAgentsPolicyPath();
+      const currentMtimeMs = getFileMtimeMs(userDataPolicyPath);
+      const hasBaseMtime = Number.isFinite(validated.value.baseMtimeMs);
+      if (
+        hasBaseMtime
+        && !validated.value.ignoreStale
+        && Math.abs(currentMtimeMs - validated.value.baseMtimeMs) > 1
+      ) {
+        return {
+          ok: false,
+          error: "stale-version",
+          path: userDataPolicyPath,
+          currentMtimeMs,
+        };
+      }
+      fs.writeFileSync(userDataPolicyPath, validated.value.content, "utf-8");
+      return {
+        ok: true,
+        path: userDataPolicyPath,
+        mtimeMs: getFileMtimeMs(userDataPolicyPath),
+      };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_EDIT_AGENTS_POLICY, async (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return { ok: false, error: "forbidden" };
+    }
+    try {
+      const userDataPolicyPath = prepareAgentsPolicyPath();
+      if (fs.existsSync(userDataPolicyPath)) {
+        const error = await shell.openPath(userDataPolicyPath);
+        if (error) {
+          return { ok: false, error };
+        }
+        return { ok: true };
+      }
+      return { ok: false, error: "AGENTS.md not found in user data directory." };
     } catch (error) {
       return { ok: false, error: String(error) };
     }

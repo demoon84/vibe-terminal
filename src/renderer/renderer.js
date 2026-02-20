@@ -3,7 +3,7 @@ const DEFAULT_PRESET_LAYOUTS = Object.freeze({
   "1x4": { id: "1x4", columns: 2, rows: 2, panelCount: 4 },
   "2x6": { id: "2x6", columns: 3, rows: 2, panelCount: 6 },
   "2x8": { id: "2x8", columns: 4, rows: 2, panelCount: 8 },
-  "3x12": { id: "3x12", columns: 4, rows: 3, panelCount: 12 },
+
 });
 
 const runtimeWindow = /** @type {any} */ (window);
@@ -22,6 +22,10 @@ const TERMINAL_FONT_SIZE_MIN = 10;
 const TERMINAL_FONT_SIZE_MAX = 24;
 const TERMINAL_FONT_STORAGE_KEY = "vibe-terminal.terminal-font-family";
 const TERMINAL_FONT_SIZE_STORAGE_KEY = "vibe-terminal.terminal-font-size";
+const AGENT_AUTO_INSTALL_SKIP_STORAGE_KEY = "vibe-terminal.agent-auto-install-skip";
+const SKILL_MANAGER_DEFAULT_DESCRIPTION = "설명이 등록되지 않은 스킬";
+const SKILL_MANAGER_REMOTE_QUERY_MIN = 2;
+const SKILL_MANAGER_SEARCH_DEBOUNCE_MS = 260;
 const TERMINAL_FONT_OPTIONS = Object.freeze([
   Object.freeze({
     label: "D2Coding (기본)",
@@ -82,6 +86,8 @@ const ui = {
   titlebarPathDivider: document.getElementById("titlebar-path-divider"),
   titlebarPathSettingButton: document.getElementById("titlebar-path-setting-btn"),
   titlebarFontSettingButton: document.getElementById("titlebar-font-setting-btn"),
+  titlebarSkillManagerButton: document.getElementById("titlebar-skill-manager-btn"),
+  titlebarEditAgentsButton: document.getElementById("titlebar-edit-agents-btn"),
   titlebarMountCodexButton: document.getElementById("titlebar-mount-codex-btn"),
   titlebarMountClaudeButton: document.getElementById("titlebar-mount-claude-btn"),
   titlebarMountGeminiButton: document.getElementById("titlebar-mount-gemini-btn"),
@@ -92,6 +98,20 @@ const ui = {
   terminalFontSizeDisplay: /** @type {HTMLElement | null} */ (document.getElementById("terminal-font-size-display")),
   terminalFontPreview: document.getElementById("terminal-font-preview"),
   terminalFontCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("terminal-font-cancel-btn")),
+  skillManagerOverlay: document.getElementById("skill-manager-overlay"),
+  skillManagerInstalledList: document.getElementById("skill-manager-installed-list"),
+  skillManagerRecommendedList: document.getElementById("skill-manager-recommended-list"),
+  skillManagerSearchInput: /** @type {HTMLInputElement | null} */ (document.getElementById("skill-manager-search-input")),
+  skillManagerUpdatedAt: document.getElementById("skill-manager-updated-at"),
+  skillManagerCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("skill-manager-cancel-btn")),
+  agentsPolicyOverlay: document.getElementById("agents-policy-overlay"),
+  agentsPolicyPath: document.getElementById("agents-policy-path"),
+  agentsPolicyEditor: /** @type {HTMLTextAreaElement | null} */ (document.getElementById("agents-policy-editor")),
+  agentsPolicyCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-cancel-btn")),
+  agentsPolicySaveButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-save-btn")),
+  agentsPolicyReloadButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-reload-btn")),
+  agentsPolicyOpenEditorButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-open-editor-btn")),
+
 };
 
 const state = {
@@ -101,11 +121,22 @@ const state = {
   sessionCapabilityBySessionId: new Map(),
   sessionSnapshotBySessionId: new Map(),
   selectedAgentBySessionId: new Map(),
+  autoInstallSkippedAgents: new Set(),
   eventUnsubscribers: [],
   isMaximized: false,
   isWindowClosing: false,
   isStoppingAllAgents: false,
   isInstallingAgentCommand: null,
+  isSkillManagerRunning: false,
+  skillManagerBusySkillKey: "",
+  skillCatalog: [],
+  skillManagerSearchQuery: "",
+  skillManagerSearchTimerId: null,
+  isAgentsPolicyLoading: false,
+  isAgentsPolicySaving: false,
+  agentsPolicyPath: "",
+  agentsPolicyInitialContent: "",
+  agentsPolicyLoadedMtimeMs: null,
   terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
 };
@@ -126,6 +157,725 @@ function setTerminalFontOverlayVisible(visible) {
   const shouldShow = Boolean(visible);
   ui.terminalFontOverlay.classList.toggle("visible", shouldShow);
   ui.terminalFontOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+}
+
+function setSkillManagerOverlayVisible(visible) {
+  if (!ui.skillManagerOverlay) {
+    return;
+  }
+  const shouldShow = Boolean(visible);
+  ui.skillManagerOverlay.classList.toggle("visible", shouldShow);
+  ui.skillManagerOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+}
+
+function setAgentsPolicyOverlayVisible(visible) {
+  if (!ui.agentsPolicyOverlay) {
+    return;
+  }
+  const shouldShow = Boolean(visible);
+  ui.agentsPolicyOverlay.classList.toggle("visible", shouldShow);
+  ui.agentsPolicyOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+}
+
+function isSkillManagerOverlayVisible() {
+  return Boolean(ui.skillManagerOverlay?.classList.contains("visible"));
+}
+
+function isAgentsPolicyOverlayVisible() {
+  return Boolean(ui.agentsPolicyOverlay?.classList.contains("visible"));
+}
+
+function normalizeSkillName(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+    return "";
+  }
+  return normalized;
+}
+
+function setSkillManagerControlsDisabled(disabled) {
+  const isDisabled = Boolean(disabled);
+  if (ui.skillManagerSearchInput) {
+    ui.skillManagerSearchInput.disabled = isDisabled;
+  }
+  if (ui.skillManagerCancelButton) {
+    ui.skillManagerCancelButton.disabled = isDisabled;
+  }
+}
+
+function normalizeSkillCatalogRows(rows) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+
+  const normalized = [];
+  for (const row of rows) {
+    const name = normalizeSkillName(row?.name);
+    if (!name) {
+      continue;
+    }
+    const installProvider = String(row?.installProvider || "").trim().toLowerCase();
+    const installRepo = String(row?.installRepo || "").trim();
+    const installs = Number.parseInt(String(row?.installs || "0"), 10);
+    const iconUrl = String(row?.iconUrl || "").trim();
+    const iconFallbackUrl = String(row?.iconFallbackUrl || "").trim();
+    normalized.push({
+      name,
+      displayName: String(row?.displayName || name),
+      description: String(row?.description || SKILL_MANAGER_DEFAULT_DESCRIPTION),
+      installed: Boolean(row?.installed),
+      recommended: Boolean(row?.recommended),
+      removable: Boolean(row?.removable),
+      source: String(row?.source || ""),
+      installProvider,
+      installRepo,
+      installs: Number.isFinite(installs) && installs > 0 ? installs : 0,
+      iconUrl,
+      iconFallbackUrl,
+    });
+  }
+  return normalized;
+}
+
+function clearSkillManagerList(listElement) {
+  if (!listElement) {
+    return;
+  }
+  listElement.innerHTML = "";
+}
+
+function appendSkillManagerEmpty(listElement, message) {
+  if (!listElement) {
+    return;
+  }
+  const empty = document.createElement("div");
+  empty.className = "skill-manager-empty";
+  empty.textContent = message;
+  listElement.appendChild(empty);
+}
+
+function toSkillCardIconText(displayName, fallbackName) {
+  const base = String(displayName || fallbackName || "").trim();
+  if (!base) {
+    return "SK";
+  }
+
+  const normalized = base
+    .replace(/["'`]/g, " ")
+    .replace(/[_./-]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim();
+  const chunks = normalized
+    .split(/\s+/)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+
+  const letters = chunks
+    .slice(0, 2)
+    .map((chunk) => String(chunk[0] || ""))
+    .join("");
+
+  if (letters.length > 0) {
+    return letters.toUpperCase();
+  }
+
+  const fallback = String(fallbackName || "").trim();
+  if (fallback.length > 0) {
+    const first = fallback.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1);
+    if (first) {
+      return first.toUpperCase();
+    }
+  }
+  return "SK";
+}
+
+function getSkillActionKey(skill) {
+  const name = normalizeSkillName(skill?.name);
+  const provider = String(skill?.installProvider || "").trim().toLowerCase();
+  const repo = String(skill?.installRepo || "").trim().toLowerCase();
+  return `${name}|${provider}|${repo}`;
+}
+
+function getSkillSourceTag(skill) {
+  if (skill.source === "agents") {
+    return "기본";
+  }
+  if (skill.source === "codex") {
+    return "사용자";
+  }
+  if (skill.source === "skills-sh") {
+    return "skills.sh";
+  }
+  if (skill.source === "curated") {
+    return "추천";
+  }
+  if (skill.recommended) {
+    return "추천";
+  }
+  return "";
+}
+
+function normalizeSkillSearchQuery(value) {
+  return String(value || "").trim();
+}
+
+function formatSkillInstallCount(count) {
+  const numeric = Number.parseInt(String(count || "0"), 10);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return "";
+  }
+  if (numeric >= 1_000_000) {
+    return `${(numeric / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  if (numeric >= 1_000) {
+    return `${(numeric / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  }
+  return `${numeric}`;
+}
+
+function doesSkillMatchQuery(skill, query) {
+  const keyword = String(query || "").toLowerCase();
+  if (!keyword) {
+    return true;
+  }
+
+  const haystack = [
+    String(skill?.name || ""),
+    String(skill?.displayName || ""),
+    String(skill?.description || ""),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return haystack.includes(keyword);
+}
+
+function setSkillManagerUpdatedAtText(updatedAt = null) {
+  if (!ui.skillManagerUpdatedAt) {
+    return;
+  }
+
+  if (!updatedAt) {
+    ui.skillManagerUpdatedAt.textContent = "업데이트: -";
+    return;
+  }
+
+  const formatted = updatedAt.toLocaleTimeString("ko-KR", {
+    hour12: false,
+  });
+  ui.skillManagerUpdatedAt.textContent = `업데이트: ${formatted}`;
+}
+
+function formatSkillActionError(errorCode) {
+  const code = String(errorCode || "");
+  if (code === "managed-skill") {
+    return "시스템 스킬은 삭제할 수 없습니다";
+  }
+  if (code === "unsupported-skill") {
+    return "지원되지 않는 스킬입니다";
+  }
+  if (code === "skill-install-script-not-found") {
+    return "스킬 설치 스크립트를 찾을 수 없습니다";
+  }
+  if (code === "curated-source-unavailable") {
+    return "기본 추천 목록을 불러오지 못했습니다";
+  }
+  if (code === "skills-cli-not-found") {
+    return "skills CLI를 찾을 수 없습니다 (npx 필요)";
+  }
+  if (code === "invalid-install-repo" || code === "invalid-payload:installRepo-format") {
+    return "스킬 저장소 형식이 올바르지 않습니다";
+  }
+  if (code === "invalid-payload:installRepo-required") {
+    return "skills.sh 설치에는 저장소 정보가 필요합니다";
+  }
+  if (code === "not-installed") {
+    return "설치되지 않은 스킬입니다";
+  }
+  if (code === "invalid-skill-name" || code === "invalid-payload:skillName-format") {
+    return "잘못된 스킬 이름입니다";
+  }
+  return code || "unknown";
+}
+
+function renderSkillManagerList(listElement, skills = [], emptyMessage = "") {
+  clearSkillManagerList(listElement);
+  if (!Array.isArray(skills) || skills.length === 0) {
+    appendSkillManagerEmpty(listElement, emptyMessage);
+    return;
+  }
+
+  for (const skill of skills) {
+    const action = skill.installed ? "remove" : "install";
+    const isBusy = state.isSkillManagerRunning
+      && state.skillManagerBusySkillKey === getSkillActionKey(skill);
+    const canRunAction = action === "install" ? true : Boolean(skill.removable);
+
+    const row = document.createElement("div");
+    row.className = "skill-manager-item";
+
+    const left = document.createElement("div");
+    left.className = "skill-manager-item-left";
+    const icon = document.createElement("span");
+    icon.className = "skill-manager-item-icon";
+    if (skill.iconUrl) {
+      const image = document.createElement("img");
+      image.className = "skill-manager-item-icon-image";
+      image.src = skill.iconUrl;
+      image.alt = "";
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.referrerPolicy = "no-referrer";
+      image.addEventListener("error", () => {
+        if (skill.iconFallbackUrl && image.src !== skill.iconFallbackUrl) {
+          image.src = skill.iconFallbackUrl;
+          return;
+        }
+        image.remove();
+        icon.textContent = toSkillCardIconText(skill.displayName, skill.name);
+      });
+      icon.appendChild(image);
+    } else {
+      icon.textContent = toSkillCardIconText(skill.displayName, skill.name);
+    }
+
+    const textWrap = document.createElement("div");
+    textWrap.className = "skill-manager-item-text";
+    const title = document.createElement("p");
+    title.className = "skill-manager-item-title";
+    title.textContent = skill.displayName;
+    const description = document.createElement("p");
+    description.className = "skill-manager-item-description";
+    description.textContent = skill.description || SKILL_MANAGER_DEFAULT_DESCRIPTION;
+    textWrap.appendChild(title);
+    textWrap.appendChild(description);
+    left.appendChild(icon);
+    left.appendChild(textWrap);
+
+    const right = document.createElement("div");
+    right.className = "skill-manager-item-right";
+
+    const sourceTagText = getSkillSourceTag(skill);
+    if (sourceTagText) {
+      const sourceTag = document.createElement("span");
+      sourceTag.className = "skill-manager-source-tag";
+      sourceTag.textContent = sourceTagText;
+      right.appendChild(sourceTag);
+    }
+
+    const installCountText = formatSkillInstallCount(skill.installs);
+    if (installCountText && !skill.installed) {
+      const installCountTag = document.createElement("span");
+      installCountTag.className = "skill-manager-source-tag";
+      installCountTag.textContent = `${installCountText} 설치`;
+      right.appendChild(installCountTag);
+    }
+
+    const actionButton = document.createElement("button");
+    actionButton.type = "button";
+    actionButton.className = `skill-manager-action-btn ${action}`;
+    actionButton.textContent = action === "install" ? "+" : "−";
+    actionButton.disabled = !canRunAction || state.isSkillManagerRunning;
+    actionButton.title = canRunAction
+      ? action === "install"
+        ? skill.installProvider === "skills-sh" ? "설치 (skills.sh)" : "설치"
+        : "삭제"
+      : "관리형 스킬은 삭제할 수 없습니다";
+
+    if (canRunAction) {
+      actionButton.addEventListener("click", async () => {
+        await runSkillManagerAction(skill, action);
+      });
+    }
+    if (isBusy) {
+      actionButton.textContent = "...";
+    }
+
+    right.appendChild(actionButton);
+    row.appendChild(left);
+    row.appendChild(right);
+    listElement?.appendChild(row);
+  }
+}
+
+function renderSkillManagerCatalog(skills = []) {
+  const all = normalizeSkillCatalogRows(skills);
+  state.skillCatalog = all;
+  const query = normalizeSkillSearchQuery(state.skillManagerSearchQuery);
+
+  const installed = all
+    .filter((skill) => skill.installed)
+    .filter((skill) => doesSkillMatchQuery(skill, query))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, "ko"));
+  const recommended = all
+    .filter((skill) => !skill.installed && skill.recommended)
+    .filter((skill) => doesSkillMatchQuery(skill, query))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, "ko"));
+
+  renderSkillManagerList(
+    ui.skillManagerInstalledList,
+    installed,
+    query ? "검색 결과가 없습니다" : "설치된 스킬이 없습니다",
+  );
+  renderSkillManagerList(
+    ui.skillManagerRecommendedList,
+    recommended,
+    query ? "검색 결과가 없습니다" : "추천 스킬을 불러오지 못했습니다",
+  );
+}
+
+async function refreshSkillManagerCatalog(options = {}) {
+  const showStatus = Boolean(options.showStatus);
+  const query = normalizeSkillSearchQuery(
+    options.query !== undefined ? options.query : state.skillManagerSearchQuery,
+  );
+  if (!api?.app?.process?.listSkills) {
+    renderSkillManagerCatalog([]);
+    setStatusLine("스킬 목록 기능을 사용할 수 없습니다");
+    return;
+  }
+
+  if (!state.isSkillManagerRunning) {
+    setSkillManagerControlsDisabled(true);
+  }
+  try {
+    const result = await api.app.process.listSkills({ query });
+    if (!result || result.ok !== true || !Array.isArray(result.skills)) {
+      renderSkillManagerCatalog([]);
+      setStatusLine(`스킬 목록 조회 실패: ${String(result?.error || "unknown")}`);
+      setSkillManagerUpdatedAtText(null);
+      return;
+    }
+
+    renderSkillManagerCatalog(result.skills);
+    if (query.length >= SKILL_MANAGER_REMOTE_QUERY_MIN && result.skillsShSourceOk === false) {
+      setStatusLine("skills.sh 검색 결과를 불러오지 못했습니다");
+    } else if (result.curatedSourceOk === false) {
+      setStatusLine("로컬 설치 스킬 목록만 표시중입니다");
+    } else if (showStatus) {
+      if (query.length >= SKILL_MANAGER_REMOTE_QUERY_MIN) {
+        setStatusLine("skills.sh 검색 결과를 반영했습니다");
+      } else {
+        setStatusLine("최신 스킬 목록을 불러왔습니다");
+      }
+    }
+    setSkillManagerUpdatedAtText(new Date());
+  } catch (error) {
+    renderSkillManagerCatalog([]);
+    setStatusLine(`스킬 목록 조회 실패: ${String(error)}`);
+    setSkillManagerUpdatedAtText(null);
+  } finally {
+    if (!state.isSkillManagerRunning) {
+      setSkillManagerControlsDisabled(false);
+    }
+  }
+}
+
+async function runSkillManagerAction(skill, action) {
+  if (!skill || state.isSkillManagerRunning) {
+    return;
+  }
+
+  const skillName = normalizeSkillName(skill.name);
+  if (!skillName) {
+    setStatusLine("스킬 이름이 유효하지 않습니다");
+    return;
+  }
+
+  if (!api?.app?.process?.installSkill || !api?.app?.process?.uninstallSkill) {
+    setStatusLine("스킬 설치/삭제 기능을 사용할 수 없습니다");
+    return;
+  }
+
+  state.isSkillManagerRunning = true;
+  state.skillManagerBusySkillKey = getSkillActionKey(skill);
+  setSkillManagerControlsDisabled(true);
+  renderSkillManagerCatalog(state.skillCatalog);
+
+  try {
+    if (action === "install") {
+      setStatusLine(`스킬 설치 중: ${skill.displayName}`);
+      const payload = {
+        skillName,
+      };
+      if (skill.installProvider) {
+        payload.installProvider = skill.installProvider;
+      }
+      if (skill.installRepo) {
+        payload.installRepo = skill.installRepo;
+      }
+      const result = await api.app.process.installSkill(payload);
+      if (!result || result.ok !== true) {
+        setStatusLine(`스킬 설치 실패: ${formatSkillActionError(result?.error)}`);
+      } else {
+        setStatusLine(`스킬 설치 완료: ${skill.displayName}`);
+      }
+    } else {
+      setStatusLine(`스킬 삭제 중: ${skill.displayName}`);
+      const result = await api.app.process.uninstallSkill({ skillName });
+      if (!result || result.ok !== true) {
+        setStatusLine(`스킬 삭제 실패: ${formatSkillActionError(result?.error)}`);
+      } else {
+        setStatusLine(`스킬 삭제 완료: ${skill.displayName}`);
+      }
+    }
+  } catch (error) {
+    setStatusLine(`스킬 작업 실패: ${String(error)}`);
+  } finally {
+    state.isSkillManagerRunning = false;
+    state.skillManagerBusySkillKey = "";
+    setSkillManagerControlsDisabled(false);
+    await refreshSkillManagerCatalog({
+      query: state.skillManagerSearchQuery,
+    });
+  }
+}
+
+function openSkillManagerDialog() {
+  if (!ui.skillManagerOverlay) {
+    setStatusLine("스킬관리 UI를 열 수 없습니다");
+    return;
+  }
+
+  setSkillManagerOverlayVisible(true);
+  setSkillManagerControlsDisabled(false);
+  state.skillManagerSearchQuery = "";
+  if (ui.skillManagerSearchInput) {
+    ui.skillManagerSearchInput.value = "";
+  }
+  setSkillManagerUpdatedAtText(null);
+  ui.skillManagerSearchInput?.focus();
+  refreshSkillManagerCatalog({ showStatus: true, query: state.skillManagerSearchQuery });
+}
+
+function closeSkillManagerDialog() {
+  if (state.isSkillManagerRunning) {
+    return;
+  }
+  if (state.skillManagerSearchTimerId) {
+    clearTimeout(state.skillManagerSearchTimerId);
+    state.skillManagerSearchTimerId = null;
+  }
+  setSkillManagerOverlayVisible(false);
+}
+
+function setAgentsPolicyPathText(pathText = "") {
+  if (!ui.agentsPolicyPath) {
+    return;
+  }
+  const normalizedPath = String(pathText || "").trim();
+  ui.agentsPolicyPath.textContent = `경로: ${normalizedPath || "-"}`;
+}
+
+function hasAgentsPolicyDraftChanges() {
+  const current = String(ui.agentsPolicyEditor?.value || "");
+  return current !== state.agentsPolicyInitialContent;
+}
+
+function syncAgentsPolicyControls() {
+  const isBusy = state.isAgentsPolicyLoading || state.isAgentsPolicySaving;
+  const hasChanges = hasAgentsPolicyDraftChanges();
+
+  if (ui.agentsPolicyEditor) {
+    ui.agentsPolicyEditor.disabled = isBusy;
+  }
+  if (ui.agentsPolicyCancelButton) {
+    ui.agentsPolicyCancelButton.disabled = isBusy;
+  }
+  if (ui.agentsPolicyReloadButton) {
+    ui.agentsPolicyReloadButton.disabled = isBusy;
+  }
+  if (ui.agentsPolicyOpenEditorButton) {
+    ui.agentsPolicyOpenEditorButton.disabled = isBusy;
+  }
+  if (ui.agentsPolicySaveButton) {
+    ui.agentsPolicySaveButton.disabled = isBusy || !hasChanges;
+  }
+}
+
+function shouldDiscardAgentsPolicyDraft() {
+  if (!hasAgentsPolicyDraftChanges()) {
+    return true;
+  }
+  return runtimeWindow.confirm("저장하지 않은 변경사항을 버릴까요?");
+}
+
+async function loadAgentsPolicyIntoEditor(options = {}) {
+  if (!api?.app?.process?.readAgentsPolicy) {
+    setStatusLine("규칙 설정 읽기 기능을 사용할 수 없습니다");
+    return false;
+  }
+
+  const showStatus = options.showStatus !== false;
+  state.isAgentsPolicyLoading = true;
+  syncAgentsPolicyControls();
+  if (showStatus) {
+    setStatusLine("규칙 설정을 불러오는 중...");
+  }
+
+  try {
+    const result = await api.app.process.readAgentsPolicy();
+    if (!result?.ok) {
+      setStatusLine(`규칙 설정 불러오기 실패: ${result?.error || "알 수 없는 오류"}`);
+      return false;
+    }
+
+    const content = typeof result.content === "string" ? result.content : "";
+    state.agentsPolicyInitialContent = content;
+    state.agentsPolicyPath = typeof result.path === "string" ? result.path.trim() : "";
+    state.agentsPolicyLoadedMtimeMs = Number.isFinite(result?.mtimeMs) ? Number(result.mtimeMs) : null;
+
+    if (ui.agentsPolicyEditor) {
+      ui.agentsPolicyEditor.value = content;
+    }
+    setAgentsPolicyPathText(state.agentsPolicyPath);
+    if (showStatus) {
+      setStatusLine("규칙 설정 파일을 불러왔습니다");
+    }
+    return true;
+  } catch (error) {
+    setStatusLine(`규칙 설정 불러오기 실패: ${String(error)}`);
+    return false;
+  } finally {
+    state.isAgentsPolicyLoading = false;
+    syncAgentsPolicyControls();
+  }
+}
+
+async function saveAgentsPolicyEditorContent() {
+  if (!ui.agentsPolicyEditor) {
+    return false;
+  }
+  if (!api?.app?.process?.writeAgentsPolicy) {
+    setStatusLine("규칙 설정 저장 기능을 사용할 수 없습니다");
+    return false;
+  }
+
+  const content = String(ui.agentsPolicyEditor.value || "");
+  if (content === state.agentsPolicyInitialContent) {
+    syncAgentsPolicyControls();
+    return true;
+  }
+
+  state.isAgentsPolicySaving = true;
+  syncAgentsPolicyControls();
+  setStatusLine("규칙 설정 저장 중...");
+
+  try {
+    const payload = { content };
+    if (Number.isFinite(state.agentsPolicyLoadedMtimeMs)) {
+      payload.baseMtimeMs = state.agentsPolicyLoadedMtimeMs;
+    }
+
+    let result = await api.app.process.writeAgentsPolicy(payload);
+    if (result?.ok !== true && result?.error === "stale-version") {
+      if (Number.isFinite(result?.currentMtimeMs)) {
+        state.agentsPolicyLoadedMtimeMs = Number(result.currentMtimeMs);
+      }
+      const shouldOverwrite = runtimeWindow.confirm(
+        "외부에서 AGENTS.md가 변경되었습니다. 현재 편집 내용으로 덮어쓸까요?",
+      );
+      if (!shouldOverwrite) {
+        setStatusLine("외부 변경 감지: 다시불러오기 후 저장하세요");
+        return false;
+      }
+      result = await api.app.process.writeAgentsPolicy({
+        content,
+        ignoreStale: true,
+      });
+    }
+    if (!result?.ok) {
+      setStatusLine(`규칙 설정 저장 실패: ${result?.error || "알 수 없는 오류"}`);
+      return false;
+    }
+
+    state.agentsPolicyInitialContent = content;
+    if (typeof result.path === "string" && result.path.trim().length > 0) {
+      state.agentsPolicyPath = result.path.trim();
+      setAgentsPolicyPathText(state.agentsPolicyPath);
+    }
+    state.agentsPolicyLoadedMtimeMs = Number.isFinite(result?.mtimeMs) ? Number(result.mtimeMs) : null;
+    setStatusLine("규칙 설정을 저장했습니다");
+    return true;
+  } catch (error) {
+    setStatusLine(`규칙 설정 저장 실패: ${String(error)}`);
+    return false;
+  } finally {
+    state.isAgentsPolicySaving = false;
+    syncAgentsPolicyControls();
+  }
+}
+
+async function reloadAgentsPolicyEditorContent() {
+  if (!shouldDiscardAgentsPolicyDraft()) {
+    return false;
+  }
+  return loadAgentsPolicyIntoEditor({ showStatus: true });
+}
+
+function closeAgentsPolicyDialog(options = {}) {
+  if (state.isAgentsPolicyLoading || state.isAgentsPolicySaving) {
+    return;
+  }
+  const force = Boolean(options.force);
+  if (!force && !shouldDiscardAgentsPolicyDraft()) {
+    return;
+  }
+  setAgentsPolicyOverlayVisible(false);
+}
+
+async function openAgentsPolicyInExternalEditor() {
+  if (!api?.app?.process?.editAgentsPolicy) {
+    setStatusLine("외부 편집기 열기 기능을 사용할 수 없습니다");
+    return false;
+  }
+  const result = await api.app.process.editAgentsPolicy();
+  if (!result?.ok) {
+    setStatusLine(`AGENTS.md 파일 편집기 열기 실패: ${result?.error || "알 수 없는 오류"}`);
+    return false;
+  }
+  setStatusLine("AGENTS.md 파일을 시스템 기본 편집기로 열었습니다.");
+  return true;
+}
+
+async function openAgentsPolicyDialog() {
+  if (!ui.agentsPolicyOverlay || !ui.agentsPolicyEditor) {
+    setStatusLine("규칙설정 UI를 열 수 없습니다");
+    return;
+  }
+  setAgentsPolicyOverlayVisible(true);
+  setAgentsPolicyPathText(state.agentsPolicyPath);
+  await loadAgentsPolicyIntoEditor({ showStatus: true });
+  ui.agentsPolicyEditor.focus();
+}
+
+async function runSkillManagerSelection() {
+  await refreshSkillManagerCatalog({
+    showStatus: true,
+    query: state.skillManagerSearchQuery,
+  });
+}
+
+function scheduleSkillManagerSearchRefresh() {
+  if (state.skillManagerSearchTimerId) {
+    clearTimeout(state.skillManagerSearchTimerId);
+    state.skillManagerSearchTimerId = null;
+  }
+
+  const query = normalizeSkillSearchQuery(state.skillManagerSearchQuery);
+  if (query.length > 0 && query.length < SKILL_MANAGER_REMOTE_QUERY_MIN) {
+    renderSkillManagerCatalog(state.skillCatalog);
+    setStatusLine("skills.sh 검색은 2글자 이상부터 지원됩니다");
+    return;
+  }
+
+  state.skillManagerSearchTimerId = setTimeout(() => {
+    state.skillManagerSearchTimerId = null;
+    refreshSkillManagerCatalog({
+      showStatus: false,
+      query,
+    });
+  }, SKILL_MANAGER_SEARCH_DEBOUNCE_MS);
 }
 
 function normalizeTerminalFontFamily(value) {
@@ -179,6 +929,64 @@ function persistTerminalFontSize(value) {
     runtimeWindow.localStorage?.setItem(TERMINAL_FONT_SIZE_STORAGE_KEY, String(value));
   } catch (_error) {
     // Best effort only.
+  }
+}
+
+function readStoredAutoInstallSkippedAgents() {
+  try {
+    const raw = runtimeWindow.localStorage?.getItem(AGENT_AUTO_INSTALL_SKIP_STORAGE_KEY) || "[]";
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+
+    const skipped = new Set();
+    for (const item of parsed) {
+      const normalized = String(item || "").trim().toLowerCase();
+      if (isAgentCommand(normalized)) {
+        skipped.add(normalized);
+      }
+    }
+    return skipped;
+  } catch (_error) {
+    return new Set();
+  }
+}
+
+function persistAutoInstallSkippedAgents() {
+  try {
+    runtimeWindow.localStorage?.setItem(
+      AGENT_AUTO_INSTALL_SKIP_STORAGE_KEY,
+      JSON.stringify([...state.autoInstallSkippedAgents]),
+    );
+  } catch (_error) {
+    // Best effort only.
+  }
+}
+
+function isAutoInstallSkippedAgent(agentCommand) {
+  if (!isAgentCommand(agentCommand)) {
+    return false;
+  }
+  return state.autoInstallSkippedAgents.has(agentCommand);
+}
+
+function setAutoInstallSkippedAgent(agentCommand, skipped) {
+  if (!isAgentCommand(agentCommand)) {
+    return;
+  }
+
+  const hasAgent = state.autoInstallSkippedAgents.has(agentCommand);
+  const shouldSkip = Boolean(skipped);
+  if (shouldSkip && !hasAgent) {
+    state.autoInstallSkippedAgents.add(agentCommand);
+    persistAutoInstallSkippedAgents();
+    return;
+  }
+
+  if (!shouldSkip && hasAgent) {
+    state.autoInstallSkippedAgents.delete(agentCommand);
+    persistAutoInstallSkippedAgents();
   }
 }
 
@@ -391,8 +1199,6 @@ async function runTerminalColorDiagnosticsOnStartup() {
   }
 }
 
-
-
 async function ensureAgentInstalled(agentCommand) {
   if (!isAgentCommand(agentCommand)) {
     return false;
@@ -422,6 +1228,7 @@ async function ensureAgentInstalled(agentCommand) {
   }
 
   if (installStatus.installed) {
+    setAutoInstallSkippedAgent(agentCommand, false);
     return true;
   }
 
@@ -437,6 +1244,7 @@ async function ensureAgentInstalled(agentCommand) {
       return false;
     }
 
+    setAutoInstallSkippedAgent(agentCommand, false);
     setStatusLine(`${agentLabel} 최신 버전 설치 완료`);
     return true;
   } catch (error) {
@@ -453,7 +1261,13 @@ async function ensureRequiredAgentsInstalledOnStartup() {
   }
 
   const failedLabels = [];
+  const skippedLabels = [];
   for (const agentCommand of REQUIRED_AGENT_COMMANDS) {
+    if (isAutoInstallSkippedAgent(agentCommand)) {
+      skippedLabels.push(AGENT_COMMAND_LABELS[agentCommand] || agentCommand);
+      continue;
+    }
+
     const ready = await ensureAgentInstalled(agentCommand);
     if (!ready) {
       failedLabels.push(AGENT_COMMAND_LABELS[agentCommand] || agentCommand);
@@ -461,6 +1275,10 @@ async function ensureRequiredAgentsInstalledOnStartup() {
   }
 
   if (failedLabels.length === 0) {
+    if (skippedLabels.length > 0) {
+      setStatusLine(`에이전트 설치 점검 완료 (자동설치 제외: ${skippedLabels.join(", ")})`);
+      return true;
+    }
     setStatusLine("에이전트 설치 점검 완료");
     return true;
   }
@@ -541,7 +1359,7 @@ const GRID_PRESET_CLASS_NAMES = Object.freeze([
   "preset-1x4",
   "preset-2x6",
   "preset-2x8",
-  "preset-3x12",
+
 ]);
 
 function applyGridPreset(presetId) {
@@ -603,26 +1421,40 @@ function captureTerminalSnapshotText(terminal, maxLines = TERMINAL_SNAPSHOT_MAX_
     : TERMINAL_SNAPSHOT_MAX_LINES;
   const startLine = Math.max(0, totalLines - boundedMaxLines);
 
-  let snapshot = "";
-  let hasWrittenLine = false;
+  const snapshotLines = [];
   for (let lineIndex = startLine; lineIndex < totalLines; lineIndex += 1) {
     const line = activeBuffer.getLine(lineIndex);
     if (!line) {
       continue;
     }
 
-    const text = line.translateToString(true);
-    const isWrapped = Boolean(line.isWrapped);
-    if (!hasWrittenLine) {
-      snapshot = text;
-      hasWrittenLine = true;
-      continue;
-    }
+    snapshotLines.push({
+      text: line.translateToString(true),
+      isWrapped: Boolean(line.isWrapped),
+    });
+  }
 
-    if (!isWrapped) {
+  // Xterm buffers include many trailing empty viewport rows; trimming them prevents
+  // fake vertical gaps after pane re-render and snapshot restore.
+  while (snapshotLines.length > 1) {
+    const last = snapshotLines[snapshotLines.length - 1];
+    if (last?.text !== "" || last?.isWrapped) {
+      break;
+    }
+    snapshotLines.pop();
+  }
+
+  if (snapshotLines.length === 0) {
+    return "";
+  }
+
+  let snapshot = snapshotLines[0]?.text || "";
+  for (let index = 1; index < snapshotLines.length; index += 1) {
+    const row = snapshotLines[index];
+    if (!row?.isWrapped) {
       snapshot += "\r\n";
     }
-    snapshot += text;
+    snapshot += row?.text || "";
   }
 
   return snapshot;
@@ -1399,12 +2231,9 @@ async function getAgentLaunchCommand(agentCommand, fullAccessEnabled) {
   if (api?.app?.process?.readAgentsPolicy) {
     try {
       const result = await api.app.process.readAgentsPolicy();
-      if (result?.ok && result.content) {
-        // Remove line breaks for safer bash injection
-        const policyText = result.content.replace(/\r?\n/g, " ").trim();
-        if (policyText) {
-          cmd += ` -p "${policyText}"`;
-        }
+      if (result?.ok && result.path && result.content?.trim().length > 0) {
+        // We instruct the agent to read the AGENTS.md file from the app's installation directory.
+        cmd += ` "I'll load ${result.path} now and align my behavior to it before taking any further action."`;
       }
     } catch (_error) {
       // Silently ignore policy read errors
@@ -1841,18 +2670,21 @@ function updateTitlebarPathSettingVisibility() {
   const isStoppingAllAgents = state.isStoppingAllAgents;
   const canUseSetupControls = !hasActiveAgent;
   const shouldShowSetupControls = canUseSetupControls && !isStoppingAllAgents;
+  const shouldShowMountControls = true;
   const shouldShowAllExit = true;
   const canOpenFontDialog = !isStoppingAllAgents;
 
   setTitlebarElementVisibility(ui.titlebarPathDivider, shouldShowSetupControls);
   setTitlebarElementVisibility(ui.titlebarPathSettingButton, shouldShowSetupControls);
+  setTitlebarElementVisibility(ui.titlebarSkillManagerButton, true);
   setTitlebarElementVisibility(ui.titlebarFontSettingButton, true);
-  setTitlebarElementVisibility(ui.titlebarMountCodexButton, shouldShowSetupControls);
-  setTitlebarElementVisibility(ui.titlebarMountClaudeButton, shouldShowSetupControls);
-  setTitlebarElementVisibility(ui.titlebarMountGeminiButton, shouldShowSetupControls);
+  setTitlebarElementVisibility(ui.titlebarMountCodexButton, shouldShowMountControls);
+  setTitlebarElementVisibility(ui.titlebarMountClaudeButton, shouldShowMountControls);
+  setTitlebarElementVisibility(ui.titlebarMountGeminiButton, shouldShowMountControls);
   setTitlebarElementVisibility(ui.titlebarAllExitButton, shouldShowAllExit);
 
   setTitlebarButtonEnabled(ui.titlebarPathSettingButton, canUseSetupControls);
+  setTitlebarButtonEnabled(ui.titlebarSkillManagerButton, !isStoppingAllAgents);
   setTitlebarButtonEnabled(ui.titlebarFontSettingButton, canOpenFontDialog);
 
   for (const button of [
@@ -1860,7 +2692,7 @@ function updateTitlebarPathSettingVisibility() {
     ui.titlebarMountClaudeButton,
     ui.titlebarMountGeminiButton,
   ]) {
-    setTitlebarButtonEnabled(button, canUseSetupControls);
+    setTitlebarButtonEnabled(button, !isStoppingAllAgents);
   }
 
   const canRunAllExit = hasActiveAgent && !isStoppingAllAgents;
@@ -1970,7 +2802,7 @@ async function mountAgentToAllVisiblePanes(agentCommand) {
     return;
   }
 
-  const views = getVisibleSessionViews();
+  let views = getVisibleSessionViews();
   if (views.length === 0) {
     setStatusLine("마운트할 패널이 없습니다");
     return;
@@ -1984,10 +2816,26 @@ async function mountAgentToAllVisiblePanes(agentCommand) {
     return;
   }
 
-  if (hasAnyActiveAgent()) {
-    updateTitlebarPathSettingVisibility();
-    setStatusLine("에이전트 실행 중에는 전체 마운트를 사용할 수 없습니다");
+  if (state.isStoppingAllAgents) {
+    setStatusLine("에이전트 종료 작업이 진행 중입니다");
+    views[0]?.terminal?.focus();
     return;
+  }
+
+  if (hasAnyActiveAgent()) {
+    const label = AGENT_COMMAND_LABELS[agentCommand] || agentCommand;
+    setStatusLine(`기존 에이전트 종료 후 ${label}로 전환 중...`);
+    await stopAllActiveAgents();
+    if (hasAnyActiveAgent()) {
+      setStatusLine(`${label} 전환 실패: 기존 에이전트 종료가 필요합니다`);
+      views[0]?.terminal?.focus();
+      return;
+    }
+    views = getVisibleSessionViews();
+    if (views.length === 0) {
+      setStatusLine("마운트할 패널이 없습니다");
+      return;
+    }
   }
 
   const installed = await ensureAgentInstalled(agentCommand);
@@ -2414,7 +3262,6 @@ function createPaneView(pane, index, preset, sessionMap) {
   });
   const fitAddon = new FitAddonCtor();
   terminal.loadAddon(fitAddon);
-  terminal.open(terminalHost);
 
   const view = {
     root,
@@ -2630,13 +3477,6 @@ function createPaneView(pane, index, preset, sessionMap) {
 
   // Let xterm handle pointer events naturally so drag-selection is not interrupted.
 
-  view.resizeObserver = new ResizeObserver(() => {
-    scheduleFitAndResize(view);
-  });
-  view.resizeObserver.observe(body);
-  syncPaneOverlayLayout(view);
-  scheduleFitAndResize(view);
-
   return view;
 }
 
@@ -2712,6 +3552,15 @@ function renderLayout(layout) {
       state.sessionToPaneId.set(pane.sessionId, pane.id);
     }
     ui.grid.appendChild(view.root);
+
+    // Xterm must correctly measure character grid sizes; open it ONLY when attached to DOM
+    view.terminal.open(view.terminalHost);
+    view.resizeObserver = new ResizeObserver(() => {
+      scheduleFitAndResize(view);
+    });
+    view.resizeObserver.observe(view.body);
+    syncPaneOverlayLayout(view);
+    scheduleFitAndResize(view);
   });
 
   updateTitlebarPathSettingVisibility();
@@ -2806,6 +3655,50 @@ function bindEvents() {
     }
     closeTerminalFontDialog();
   });
+  ui.skillManagerSearchInput?.addEventListener("input", () => {
+    state.skillManagerSearchQuery = normalizeSkillSearchQuery(ui.skillManagerSearchInput?.value);
+    scheduleSkillManagerSearchRefresh();
+  });
+  ui.skillManagerCancelButton?.addEventListener("click", () => {
+    closeSkillManagerDialog();
+  });
+  ui.skillManagerOverlay?.addEventListener("click", (event) => {
+    if (event.target !== ui.skillManagerOverlay) {
+      return;
+    }
+    closeSkillManagerDialog();
+  });
+  ui.agentsPolicyEditor?.addEventListener("input", () => {
+    syncAgentsPolicyControls();
+  });
+  ui.agentsPolicyEditor?.addEventListener("keydown", (event) => {
+    if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+    if (String(event.key || "").toLowerCase() !== "s") {
+      return;
+    }
+    event.preventDefault();
+    saveAgentsPolicyEditorContent();
+  });
+  ui.agentsPolicyCancelButton?.addEventListener("click", () => {
+    closeAgentsPolicyDialog();
+  });
+  ui.agentsPolicySaveButton?.addEventListener("click", async () => {
+    await saveAgentsPolicyEditorContent();
+  });
+  ui.agentsPolicyReloadButton?.addEventListener("click", async () => {
+    await reloadAgentsPolicyEditorContent();
+  });
+  ui.agentsPolicyOpenEditorButton?.addEventListener("click", async () => {
+    await openAgentsPolicyInExternalEditor();
+  });
+  ui.agentsPolicyOverlay?.addEventListener("click", (event) => {
+    if (event.target !== ui.agentsPolicyOverlay) {
+      return;
+    }
+    closeAgentsPolicyDialog();
+  });
 
   ui.windowMinimizeButton?.addEventListener("click", () => {
     api.app.window.minimize();
@@ -2822,6 +3715,14 @@ function bindEvents() {
   ui.titlebarPathSettingButton?.addEventListener("click", async () => {
     await applyGlobalDirectoryToVisiblePanes();
   });
+  ui.titlebarSkillManagerButton?.addEventListener("click", () => {
+    openSkillManagerDialog();
+  });
+
+  ui.titlebarEditAgentsButton?.addEventListener("click", async () => {
+    await openAgentsPolicyDialog();
+  });
+
   ui.titlebarFontSettingButton?.addEventListener("click", () => {
     openTerminalFontDialog();
   });
@@ -2862,6 +3763,14 @@ function bindEvents() {
       return;
     }
     event.preventDefault();
+    if (isAgentsPolicyOverlayVisible()) {
+      closeAgentsPolicyDialog();
+      return;
+    }
+    if (isSkillManagerOverlayVisible()) {
+      closeSkillManagerDialog();
+      return;
+    }
     if (ui.terminalFontOverlay?.classList.contains("visible")) {
       closeTerminalFontDialog();
       return;
@@ -2871,6 +3780,9 @@ function bindEvents() {
   state.eventUnsubscribers.push(() => {
     window.removeEventListener("keydown", handleEscapeForInstallPrompt, true);
   });
+
+  setAgentsPolicyPathText(state.agentsPolicyPath);
+  syncAgentsPolicyControls();
 
   state.eventUnsubscribers.push(
     api.app.window.onState((payload) => {
@@ -2929,6 +3841,7 @@ async function bootstrap() {
 
   state.terminalFontFamily = readStoredTerminalFontFamily();
   state.terminalFontSize = readStoredTerminalFontSize();
+  state.autoInstallSkippedAgents = readStoredAutoInstallSkippedAgents();
   applyTerminalFontSettings(
     {
       fontFamily: state.terminalFontFamily,

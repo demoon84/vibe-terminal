@@ -17,7 +17,7 @@ const PRESET_IDS = Object.freeze({
   ONE_BY_FOUR: "1x4",
   TWO_BY_SIX: "2x6",
   TWO_BY_EIGHT: "2x8",
-  THREE_BY_TWELVE: "3x12",
+
 });
 
 const PRESET_DEFINITIONS = Object.freeze({

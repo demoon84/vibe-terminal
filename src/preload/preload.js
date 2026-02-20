@@ -22,6 +22,10 @@ const IPC_CHANNELS = Object.freeze({
   APP_PICK_FILES: "app:pick-files",
   APP_AGENT_INSTALL_STATUS: "app:agent-install-status",
   APP_AGENT_INSTALL_LATEST: "app:agent-install-latest",
+  APP_AGENT_UNINSTALL: "app:agent-uninstall",
+  APP_SKILL_CATALOG: "app:skill-catalog",
+  APP_SKILL_INSTALL: "app:skill-install",
+  APP_SKILL_UNINSTALL: "app:skill-uninstall",
 
   APP_PWSH7_STATUS: "app:pwsh7-status",
   APP_PWSH7_INSTALL: "app:pwsh7-install",
@@ -35,6 +39,9 @@ const IPC_CHANNELS = Object.freeze({
   APP_CLIPBOARD_WRITE: "app:clipboard-write",
   APP_QUERY_EDITORS: "app:query-editors",
   APP_OPEN_IN_EDITOR: "app:open-in-editor",
+  APP_READ_AGENTS_POLICY: "app:read-agents-policy",
+  APP_WRITE_AGENTS_POLICY: "app:write-agents-policy",
+  APP_EDIT_AGENTS_POLICY: "app:edit-agents-policy",
 });
 
 function subscribe(channel, listener) {
@@ -83,6 +90,10 @@ const appApi = Object.freeze({
     checkAgentInstallStatus: (payload) =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_AGENT_INSTALL_STATUS, payload),
     installAgentLatest: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_AGENT_INSTALL_LATEST, payload),
+    uninstallAgent: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_AGENT_UNINSTALL, payload),
+    listSkills: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_SKILL_CATALOG, payload),
+    installSkill: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_SKILL_INSTALL, payload),
+    uninstallSkill: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_SKILL_UNINSTALL, payload),
 
     checkPowerShell7Status: () => ipcRenderer.invoke(IPC_CHANNELS.APP_PWSH7_STATUS),
     installPowerShell7: () => ipcRenderer.invoke(IPC_CHANNELS.APP_PWSH7_INSTALL),
@@ -95,6 +106,8 @@ const appApi = Object.freeze({
     queryEditors: () => ipcRenderer.invoke(IPC_CHANNELS.APP_QUERY_EDITORS),
     openInEditor: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_IN_EDITOR, payload),
     readAgentsPolicy: () => ipcRenderer.invoke(IPC_CHANNELS.APP_READ_AGENTS_POLICY),
+    writeAgentsPolicy: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_WRITE_AGENTS_POLICY, payload),
+    editAgentsPolicy: () => ipcRenderer.invoke(IPC_CHANNELS.APP_EDIT_AGENTS_POLICY),
   }),
 });
 
@@ -133,6 +146,10 @@ contextBridge.exposeInMainWorld(
       pickFiles: (payload) => appApi.write.pickFiles(payload),
       checkAgentInstallStatus: (payload) => appApi.process.checkAgentInstallStatus(payload),
       installAgentLatest: (payload) => appApi.process.installAgentLatest(payload),
+      uninstallAgent: (payload) => appApi.process.uninstallAgent(payload),
+      listSkills: (payload) => appApi.process.listSkills(payload),
+      installSkill: (payload) => appApi.process.installSkill(payload),
+      uninstallSkill: (payload) => appApi.process.uninstallSkill(payload),
 
       checkPowerShell7Status: () => appApi.process.checkPowerShell7Status(),
       installPowerShell7: () => appApi.process.installPowerShell7(),
@@ -144,6 +161,8 @@ contextBridge.exposeInMainWorld(
       queryEditors: () => appApi.process.queryEditors(),
       openInEditor: (payload) => appApi.process.openInEditor(payload),
       readAgentsPolicy: () => appApi.process.readAgentsPolicy(),
+      writeAgentsPolicy: (payload) => appApi.process.writeAgentsPolicy(payload),
+      editAgentsPolicy: () => appApi.process.editAgentsPolicy(),
       readClipboardText: () => appApi.read.clipboardText(),
       readClipboardImageToTemp: () => appApi.read.clipboardImageToTemp(),
       writeClipboardText: (text) => appApi.write.clipboardText(text),

@@ -6,7 +6,7 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://raw.githubusercontent.com https://github.com https://skills.sh file:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
   <title>Vibe Terminal</title>
   <link rel="icon" type="image/png" href="./app-icon.png" />
   <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
@@ -21,31 +21,34 @@
         <span class="titlebar-app-text">Vibe Terminal</span>
       </span>
       <div class="titlebar-preset-group">
-        <button data-preset-button="1x2">2분할</button>
-        <button data-preset-button="1x4">4분할</button>
-        <button data-preset-button="2x6">6분할</button>
-        <button data-preset-button="2x8">8분할</button>
-        <button data-preset-button="3x12">12분할</button>
-        <span id="titlebar-path-divider" class="titlebar-preset-divider" aria-hidden="true">|</span>
-        <button id="titlebar-mount-codex-btn" class="titlebar-app-mount-btn" type="button">
-          Codex
-        </button>
-        <button id="titlebar-mount-claude-btn" class="titlebar-app-mount-btn" type="button">
-          Claude
-        </button>
-        <button id="titlebar-mount-gemini-btn" class="titlebar-app-mount-btn" type="button">
-          Gemini
-        </button>
-        <span class="titlebar-preset-divider" aria-hidden="true">|</span>
-        <button id="titlebar-path-setting-btn" class="titlebar-path-setting-btn" type="button">
-          경로설정
-        </button>
-        <button id="titlebar-font-setting-btn" class="titlebar-path-setting-btn" type="button">
-          폰트
-        </button>
-        <button id="titlebar-all-exit-btn" class="titlebar-all-exit-btn" type="button">
-          모두종료
-        </button>
+        <!-- Layout Segment -->
+        <div class="titlebar-segment">
+          <button data-preset-button="1x2">2분할</button>
+          <button data-preset-button="1x4">4분할</button>
+          <button data-preset-button="2x6">6분할</button>
+          <button data-preset-button="2x8">8분할</button>
+        </div>
+
+        <!-- Agent Segment -->
+        <div class="titlebar-segment">
+          <button id="titlebar-mount-codex-btn" class="titlebar-app-mount-btn" type="button">Codex</button>
+          <button id="titlebar-mount-claude-btn" class="titlebar-app-mount-btn" type="button">Claude</button>
+          <button id="titlebar-mount-gemini-btn" class="titlebar-app-mount-btn" type="button">Gemini</button>
+        </div>
+
+        <!-- Utils Segment -->
+        <div class="titlebar-segment">
+          <button id="titlebar-skill-manager-btn" class="titlebar-path-setting-btn" type="button">스킬관리</button>
+          <button id="titlebar-edit-agents-btn" class="titlebar-path-setting-btn" type="button">규칙설정</button>
+          <button id="titlebar-path-setting-btn" class="titlebar-path-setting-btn" type="button">경로설정</button>
+          <button id="titlebar-font-setting-btn" class="titlebar-path-setting-btn" type="button">폰트</button>
+        </div>
+
+        <!-- Exit Action -->
+        <div class="titlebar-segment">
+          <button id="titlebar-all-exit-btn" class="titlebar-path-setting-btn titlebar-all-exit-btn"
+            type="button">모두종료</button>
+        </div>
       </div>
     </div>
     <div class="window-controls">
@@ -70,6 +73,9 @@
   <div id="terminal-font-overlay" class="agent-install-overlay" aria-hidden="true">
     <div class="agent-install-card terminal-font-card" role="dialog" aria-modal="true"
       aria-labelledby="terminal-font-title">
+      <button id="terminal-font-cancel-btn" class="agent-install-close-btn" type="button" aria-label="닫기">
+        <span class="wc-icon wc-icon-close" aria-hidden="true"></span>
+      </button>
       <h2 id="terminal-font-title">터미널 글자 크기 변경</h2>
       <div class="terminal-font-size-row">
         <input id="terminal-font-size-range" class="terminal-font-size-range" type="range" min="10" max="24" step="1"
@@ -78,8 +84,52 @@
         <span class="terminal-font-size-unit">px</span>
       </div>
       <p id="terminal-font-preview" class="terminal-font-preview">AaBbCc 1234 한글 테스트</p>
-      <div class="agent-install-actions">
-        <button id="terminal-font-cancel-btn" type="button">닫기</button>
+    </div>
+  </div>
+
+  <div id="skill-manager-overlay" class="agent-install-overlay" aria-hidden="true">
+    <div class="agent-install-card skill-manager-card" role="dialog" aria-modal="true"
+      aria-labelledby="skill-manager-title">
+      <button id="skill-manager-cancel-btn" class="agent-install-close-btn" type="button" aria-label="닫기">
+        <span class="wc-icon wc-icon-close" aria-hidden="true"></span>
+      </button>
+      <h2 id="skill-manager-title">스킬</h2>
+      <p class="agent-install-message">기본 추천 목록과 설치 스킬을 확인하고, 검색어 2글자 이상이면 skills.sh 최신 검색 결과를 불러옵니다.</p>
+      <div class="skill-manager-toolbar">
+        <input id="skill-manager-search-input" class="skill-manager-search-input" type="text"
+          placeholder="스킬 검색 (2글자 이상 입력 시 skills.sh)" />
+        <span id="skill-manager-updated-at" class="skill-manager-updated-at">업데이트: -</span>
+      </div>
+      <div class="skill-manager-section">
+        <div class="skill-manager-section-head">
+          <h3>설치됨</h3>
+        </div>
+        <div id="skill-manager-installed-list" class="skill-manager-grid"></div>
+      </div>
+      <div class="skill-manager-section">
+        <div class="skill-manager-section-head">
+          <h3>추천</h3>
+        </div>
+        <div id="skill-manager-recommended-list" class="skill-manager-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="agents-policy-overlay" class="agent-install-overlay" aria-hidden="true">
+    <div class="agent-install-card agents-policy-card" role="dialog" aria-modal="true"
+      aria-labelledby="agents-policy-title">
+      <button id="agents-policy-cancel-btn" class="agent-install-close-btn" type="button" aria-label="닫기">
+        <span class="wc-icon wc-icon-close" aria-hidden="true"></span>
+      </button>
+      <h2 id="agents-policy-title">규칙 설정 (AGENTS.md)</h2>
+      <p class="agent-install-message">앱 전용 AGENTS.md를 직접 수정합니다. 저장 후 새 세션부터 규칙이 반영됩니다.</p>
+      <p id="agents-policy-path" class="agents-policy-path">경로: -</p>
+      <textarea id="agents-policy-editor" class="agents-policy-editor" spellcheck="false"
+        placeholder="규칙 내용을 입력하세요"></textarea>
+      <div class="agents-policy-actions">
+        <button id="agents-policy-open-editor-btn" class="agents-policy-action-btn" type="button">외부 편집기</button>
+        <button id="agents-policy-reload-btn" class="agents-policy-action-btn" type="button">다시불러오기</button>
+        <button id="agents-policy-save-btn" class="agents-policy-action-btn primary" type="button">저장</button>
       </div>
     </div>
   </div>

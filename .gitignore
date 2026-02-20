@@ -8,7 +8,7 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 .idea
-release
+release/
 package-lock.json
 .DS_Store
 .codex/

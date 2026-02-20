@@ -22,6 +22,10 @@ const IPC_CHANNELS = Object.freeze({
   APP_PICK_FILES: "app:pick-files",
   APP_AGENT_INSTALL_STATUS: "app:agent-install-status",
   APP_AGENT_INSTALL_LATEST: "app:agent-install-latest",
+  APP_AGENT_UNINSTALL: "app:agent-uninstall",
+  APP_SKILL_CATALOG: "app:skill-catalog",
+  APP_SKILL_INSTALL: "app:skill-install",
+  APP_SKILL_UNINSTALL: "app:skill-uninstall",
 
   APP_PWSH7_STATUS: "app:pwsh7-status",
   APP_PWSH7_INSTALL: "app:pwsh7-install",
@@ -36,6 +40,8 @@ const IPC_CHANNELS = Object.freeze({
   APP_QUERY_EDITORS: "app:query-editors",
   APP_OPEN_IN_EDITOR: "app:open-in-editor",
   APP_READ_AGENTS_POLICY: "app:read-agents-policy",
+  APP_WRITE_AGENTS_POLICY: "app:write-agents-policy",
+  APP_EDIT_AGENTS_POLICY: "app:edit-agents-policy",
 });
 
 module.exports = {
