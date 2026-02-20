@@ -1,19 +1,31 @@
 # vibe-terminal-layout-system
 
-Electron-based multi-pane terminal app for long-running agent workflows.
+Electron-first multi-pane terminal for long-running agent workflows (Codex, Claude, Gemini), with tmux-based session orchestration and an optional legacy HTTP/WebSocket runtime.
 
-## What this repo includes
+## Purpose
 
-- Electron app (`src/main`, `src/preload`, `src/renderer`)
-- PTY/tmux session orchestration with preset layouts (`1x2`, `1x4`, `2x6`, `2x8`, `3x12`)
-- Agent runtime integration (Codex / Claude / Gemini)
-- Legacy web server runtime (`server/`)
+This repository provides:
+
+- an Electron desktop app (`src/main`, `src/preload`, `src/renderer`)
+- PTY/tmux orchestration with layout presets
+- agent CLI integration and runtime dependency checks
+- an optional legacy server runtime (`server/`)
+
+## Key Features
+
+- Preset layouts: `1x2`, `1x4`, `2x6`, `2x8`, `3x12`
+- Layout/session managers keep visible panes mapped to PTY or tmux sessions
+- Startup checks/install helpers for `tmux`, PowerShell 7 (Windows), Node.js, and agent CLIs
+- GUI PATH augmentation for Homebrew, `~/.nvm`, `~/.volta`, and `~/.local/bin`
+- UTF-8 terminal locale fallback for stable prompt rendering
+- Hardened main/renderer boundary (sandboxed renderer, IPC validation/trust guards, clipboard rate limiting)
+- Optional Express + WebSocket server for legacy workflows
 
 ## Requirements
 
 - Node.js 20+
 - npm
-- tmux (recommended/required for stable multi-session behavior)
+- tmux (recommended for stable multi-session behavior)
 
 Install tmux:
 
@@ -25,68 +37,70 @@ brew install tmux
 winget install --id GnuWin32.Tmux --source winget -e
 ```
 
-## Quick start (Electron)
+## Install
 
 ```bash
 npm install
+```
+
+## Run
+
+Electron app:
+
+```bash
 npm run electron:start
 ```
 
-Development mode:
+Electron dev mode:
 
 ```bash
 npm run electron:dev
 ```
 
-tmux-first workflow:
+tmux-first Electron launch:
 
 ```bash
 npm run electron:tmux
 ```
 
-- Default tmux session name: `vibe-terminal-dev`
-- Override: `TMUX_SESSION_NAME=<name> npm run electron:tmux`
+- Default tmux session: `vibe-terminal-dev`
+- Override via env: `TMUX_SESSION_NAME=<name> npm run electron:tmux`
 
-## Auto dependency checks at app startup
-
-The app can validate/install runtime dependencies from the UI startup flow:
-
-- `tmux`
-- PowerShell 7 (Windows)
-- Node.js runtime
-- Agent CLIs (Codex / Claude / Gemini)
-
-Recent hardening and layout updates included in this branch:
-
-- GUI PATH augmentation for macOS/Linux (Homebrew + user tool bins like `~/.nvm`, `~/.volta`, `~/.local/bin`)
-- Resolved npm execution path for agent auto-install (prevents `npm-not-found` in GUI launch contexts)
-- UTF-8 locale fallback in terminal sessions (prevents mojibake prompt rendering)
-- Node runtime detection/auto-install now runs with augmented PATH in GUI launch contexts
-- Default startup layout preset changed to `1x2` (from `1x4`) for faster first-use flow
-- Layout restore now recovers sessions only for visible panes and clears hidden pane session bindings
-
-## Packaging
-
-### macOS DMG
+Legacy server runtime (optional):
 
 ```bash
-npx electron-builder --mac dmg
+npm run dev   # watch mode
+npm start     # production mode
 ```
 
-Output:
+Open: `http://localhost:4310`
 
-- `release/Vibe Terminal-<version>-arm64.dmg`
-- `release/Vibe Terminal-<version>-arm64.dmg.blockmap`
+## Environment Variables (Legacy Server)
 
-### Windows
+Configuration is loaded from `.env*` files (`.env.<env>.local` -> `.env.local` -> `.env.<env>` -> `.env`) and process env.
 
-```bash
-npm run package          # portable
-npm run package:installer # nsis
-npm run package:dir
-```
+Important keys:
 
-## Validation commands
+- `API_TOKEN`
+- `REQUIRE_API_TOKEN_FOR_LOOPBACK`
+- `ALLOWED_ORIGINS`, `ALLOWED_ORIGINS_DEV`, `ALLOWED_ORIGINS_STAGE`, `ALLOWED_ORIGINS_PROD`
+- `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS`
+- `WS_RATE_LIMIT_WINDOW_MS`, `WS_RATE_LIMIT_MAX_MESSAGES`
+- `COMMAND_ALLOWLIST`, `COMMAND_APPROVAL_TOKEN`
+- `PERSIST_COMMAND_IN_WORKSET`, `PERSIST_ENV_IN_WORKSET`
+- `MASK_SENSITIVE_ENV_VALUES`
+
+## Security and Session Guardrails
+
+- Token-based authorization for API/WS flows (`Authorization` or `x-api-token`)
+- Environment-aware loopback token policy (`REQUIRE_API_TOKEN_FOR_LOOPBACK`)
+- Origin allowlist enforcement (`ALLOWED_ORIGINS*`)
+- HTTP/WS rate limiting plus periodic bucket cleanup
+- Command gating with allowlist/approval token controls
+- Sensitive env masking and persistence controls for stored worksets
+- Window-close session cleanup and renderer isolation
+
+## Validation and Tests
 
 ```bash
 npm run check
@@ -94,28 +108,47 @@ npm test
 npm run security:deps
 ```
 
-Layout/runtime regression tests added for this behavior:
-
-- `test/layout-manager.test.js`
-- `test/node-runtime-path-regression.test.js`
-
-## Legacy web runtime (optional)
+Focused security regression:
 
 ```bash
-npm install
-npm start
+npm test -- test/security-regression.test.js
 ```
 
-Open: `http://localhost:4310`
+## Build and Packaging
 
-## Key files
+```bash
+npm run rebuild:native
+npm run package           # Windows portable
+npm run package:installer # Windows NSIS installer
+npm run package:dir       # Windows unpacked dir
+npm run package:mac       # macOS DMG
+npm run package:mac:dir   # macOS unpacked dir
+```
+
+Artifacts are generated under `release/`.
+
+## Project Structure
+
+- `src/main/`: Electron main process, layout/session managers, IPC router/validators/trust guard
+- `src/preload/`: renderer bridge API
+- `src/renderer/`: terminal UI and client behavior
+- `src/shared/`: shared models and IPC channel constants
+- `server/`: legacy Express + WebSocket runtime, security config, telemetry, panel manager
+- `scripts/`: launch/check/security utility scripts
+- `docs/`: IPC, security, and state-machine documentation
+- `test/`: regression and unit test suites
+- `public/`, `assets/`, `data/`: static assets, build resources, persisted runtime data
+
+## Key Files
 
 - `src/main/main.js`
 - `src/main/session-manager.js`
 - `src/main/layout-manager.js`
+- `src/main/ipc-router.js`
+- `src/main/ipc-validators.js`
 - `src/main/path-utils.js`
-- `src/preload/preload.js`
-- `src/renderer/renderer.js`
+- `server/config.js`
+- `server/panelManager.js`
 - `scripts/run-electron-with-tmux.sh`
 - `docs/ipc-contract.md`
 - `docs/state-machines.md`
@@ -123,15 +156,10 @@ Open: `http://localhost:4310`
 ## Troubleshooting
 
 - `preset failed ... tmux unavailable ... ENOENT`
-  - Install tmux and relaunch app.
-  - Confirm `tmux` is available in your shell: `command -v tmux`.
-
+  - Install tmux and relaunch.
+  - Verify with `command -v tmux`.
 - `Codex install failed: npm-not-found`
-  - Confirm npm is installed: `npm -v`.
-  - Relaunch with the latest build (includes GUI PATH fallback for nvm/volta/homebrew).
-
+  - Confirm npm is installed (`npm -v`).
+  - Relaunch from latest build with PATH fallback support.
 - Prompt text appears garbled (`M-^D...` style)
-  - Use the latest build in this branch; UTF-8 locale fallback is now enforced for terminal sessions.
-
-- Dock icon size differs between idle/running on macOS
-  - Use the latest packaged app; runtime dock icon override was removed so running state uses bundle icon consistently.
+  - Use the latest build with UTF-8 fallback enabled.
