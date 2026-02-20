@@ -9,6 +9,7 @@
   --danger: #cf7f7f;
   --titlebar-height: 54px;
   --window-control-button-width: 48px;
+  --window-control-height-reduction: 3px;
   --window-controls-width: calc(var(--window-control-button-width) * 3);
   --titlebar-preset-btn-width: 54px;
   --titlebar-action-btn-width: 72px;
@@ -230,7 +231,8 @@ body {
   border: 0;
   border-radius: 0;
   width: var(--window-control-button-width);
-  height: 100%;
+  height: calc(100% - var(--window-control-height-reduction));
+  align-self: center;
   min-height: 0;
   background: transparent;
   color: var(--text);
