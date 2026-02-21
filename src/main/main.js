@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const os = require("os");
 const { pathToFileURL } = require("url");
 const { spawn, spawnSync } = require("child_process");
@@ -3476,24 +3477,137 @@ app.whenReady().then(() => {
     return path.join(app.getPath("userData"), "AGENTS.md");
   }
 
+  function resolveAgentsPolicySourcePath() {
+    const appPolicyPath = path.join(app.getAppPath(), "AGENTS.md");
+    if (fs.existsSync(appPolicyPath)) {
+      return appPolicyPath;
+    }
+    const fallbackPath = path.join(process.cwd(), "AGENTS.md");
+    if (fs.existsSync(fallbackPath)) {
+      return fallbackPath;
+    }
+    return "";
+  }
+
+  function readAgentsPolicySourceContent() {
+    const sourcePath = resolveAgentsPolicySourcePath();
+    if (!sourcePath) {
+      return "";
+    }
+    try {
+      return fs.readFileSync(sourcePath, "utf-8");
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function computeTextHash(value) {
+    return crypto.createHash("sha256").update(String(value || ""), "utf-8").digest("hex");
+  }
+
+  function resolveAgentsPolicySyncMetaPath(userDataPolicyPath) {
+    return path.join(path.dirname(userDataPolicyPath), "AGENTS.sync.json");
+  }
+
+  function readAgentsPolicySyncMeta(metaPath) {
+    if (!metaPath || !fs.existsSync(metaPath)) {
+      return null;
+    }
+    try {
+      const raw = fs.readFileSync(metaPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      const sourceHash = typeof parsed?.sourceHash === "string" ? parsed.sourceHash.trim() : "";
+      const userHash = typeof parsed?.userHash === "string" ? parsed.userHash.trim() : "";
+      const autoSyncEligible = typeof parsed?.autoSyncEligible === "boolean" ? parsed.autoSyncEligible : null;
+      if (!sourceHash || !userHash || autoSyncEligible === null) {
+        return null;
+      }
+      return { sourceHash, userHash, autoSyncEligible };
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function writeAgentsPolicySyncMeta(metaPath, meta) {
+    if (!metaPath || !meta) {
+      return;
+    }
+    try {
+      fs.writeFileSync(
+        metaPath,
+        JSON.stringify(
+          {
+            sourceHash: meta.sourceHash,
+            userHash: meta.userHash,
+            autoSyncEligible: Boolean(meta.autoSyncEligible),
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+    } catch (_error) {
+      // Ignore metadata sync failures; AGENTS.md remains the source of truth.
+    }
+  }
+
   function prepareAgentsPolicyPath() {
     const userDataPolicyPath = resolveAgentsPolicyPath();
     const userDataDir = path.dirname(userDataPolicyPath);
-    const appPolicyPath = path.join(app.getAppPath(), "AGENTS.md");
-    const fallbackPath = path.join(process.cwd(), "AGENTS.md");
 
     if (!fs.existsSync(userDataDir)) {
       fs.mkdirSync(userDataDir, { recursive: true });
     }
 
+    const sourceContent = readAgentsPolicySourceContent();
+    const sourceHash = computeTextHash(sourceContent);
+    const syncMetaPath = resolveAgentsPolicySyncMetaPath(userDataPolicyPath);
+
     if (!fs.existsSync(userDataPolicyPath)) {
-      if (fs.existsSync(appPolicyPath)) {
-        fs.copyFileSync(appPolicyPath, userDataPolicyPath);
-      } else if (fs.existsSync(fallbackPath)) {
-        fs.copyFileSync(fallbackPath, userDataPolicyPath);
-      } else {
-        fs.writeFileSync(userDataPolicyPath, "", "utf-8");
-      }
+      fs.writeFileSync(userDataPolicyPath, sourceContent, "utf-8");
+      writeAgentsPolicySyncMeta(syncMetaPath, {
+        sourceHash,
+        userHash: computeTextHash(sourceContent),
+        autoSyncEligible: true,
+      });
+      return userDataPolicyPath;
+    }
+
+    const userContent = fs.readFileSync(userDataPolicyPath, "utf-8");
+    const userHash = computeTextHash(userContent);
+    const syncMeta = readAgentsPolicySyncMeta(syncMetaPath);
+
+    const canAutoSyncFromSource = Boolean(
+      syncMeta
+      && syncMeta.autoSyncEligible
+      && syncMeta.userHash === userHash
+      && syncMeta.sourceHash !== sourceHash,
+    );
+
+    if (canAutoSyncFromSource) {
+      fs.writeFileSync(userDataPolicyPath, sourceContent, "utf-8");
+      writeAgentsPolicySyncMeta(syncMetaPath, {
+        sourceHash,
+        userHash: computeTextHash(sourceContent),
+        autoSyncEligible: true,
+      });
+      return userDataPolicyPath;
+    }
+
+    const inferredAutoSyncEligible = userHash === sourceHash
+      ? true
+      : Boolean(syncMeta && syncMeta.autoSyncEligible && syncMeta.userHash === userHash);
+    const shouldRefreshMeta = !syncMeta
+      || syncMeta.sourceHash !== sourceHash
+      || syncMeta.userHash !== userHash
+      || syncMeta.autoSyncEligible !== inferredAutoSyncEligible;
+    if (shouldRefreshMeta) {
+      writeAgentsPolicySyncMeta(syncMetaPath, {
+        sourceHash,
+        userHash,
+        autoSyncEligible: inferredAutoSyncEligible,
+      });
     }
 
     return userDataPolicyPath;
@@ -3553,6 +3667,13 @@ app.whenReady().then(() => {
         };
       }
       fs.writeFileSync(userDataPolicyPath, validated.value.content, "utf-8");
+      const sourceHash = computeTextHash(readAgentsPolicySourceContent());
+      const userHash = computeTextHash(validated.value.content);
+      writeAgentsPolicySyncMeta(resolveAgentsPolicySyncMetaPath(userDataPolicyPath), {
+        sourceHash,
+        userHash,
+        autoSyncEligible: userHash === sourceHash,
+      });
       return {
         ok: true,
         path: userDataPolicyPath,
