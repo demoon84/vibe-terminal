@@ -2670,7 +2670,7 @@ function updateTitlebarPathSettingVisibility() {
   const isStoppingAllAgents = state.isStoppingAllAgents;
   const canUseSetupControls = !hasActiveAgent;
   const shouldShowSetupControls = canUseSetupControls && !isStoppingAllAgents;
-  const shouldShowMountControls = true;
+  const shouldShowMountControls = !hasActiveAgent;
   const shouldShowAllExit = true;
   const canOpenFontDialog = !isStoppingAllAgents;
 
