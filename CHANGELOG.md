@@ -13,6 +13,11 @@
 - 변경 파일: `src/main/main.js`, `package.json`
 - 검증 결과: `node --check src/main/main.js` 통과, `package.json`의 `build.extraResources`에 `AGENTS.md` 포함 설정 확인.
 
+### 3) 기본 설치 스킬 삭제 가능하도록 스킬 관리자 수정
+- 요청 요약: Vibe Terminal에 기본 설치된 스킬도 스킬관리에서 삭제할 수 있도록 동작 개선.
+- 변경 파일: `src/main/main.js`, `src/renderer/renderer.js`
+- 검증 결과: `node --check src/main/main.js` 통과, `node --check src/renderer/renderer.js` 통과.
+
 ## 2026-02-20
 ### 1) UI/UX 및 에이전트 마운트/정책/스킬/안정성 개선
 - 요청 요약: 타이틀바 액션, 스킬/정책 오버레이, 에이전트 마운트 흐름, 정책/스킬 IPC, 런타임 안정성 개선을 일괄 반영.

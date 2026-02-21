@@ -2323,7 +2323,7 @@ async function getSkillCatalog(options = {}) {
       description: local.description || DEFAULT_SKILL_DESCRIPTION,
       installed: true,
       recommended: false,
-      removable: false,
+      removable: true,
       source: "agents",
       installProvider: null,
       installRepo: "",
@@ -2634,25 +2634,85 @@ function uninstallSkill(skillName) {
   const installedInCodex = fs.existsSync(codexPath);
   const installedInAgents = fs.existsSync(agentsPath);
 
-  if (!installedInCodex) {
+  if (!installedInCodex && !installedInAgents) {
     return {
       ok: false,
-      error: installedInAgents ? "managed-skill" : "not-installed",
+      error: "not-installed",
       skillName: normalized,
     };
   }
 
-  try {
-    fs.rmSync(codexPath, {
-      recursive: true,
-      force: false,
-      maxRetries: 2,
-    });
-  } catch (error) {
+  let stdout = "";
+  let stderr = "";
+
+  if (installedInAgents) {
+    const npxCommand = resolveNpxCommand();
+    if (npxCommand) {
+      const cliResult = spawnSync(
+        npxCommand,
+        [
+          "-y",
+          "skills",
+          "remove",
+          normalized,
+          "--global",
+          "--yes",
+        ],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+          env: withAugmentedPath(process.env),
+          cwd: app.getPath("home"),
+        },
+      );
+      stdout = trimTail(String(cliResult.stdout || ""));
+      stderr = trimTail(String(cliResult.stderr || ""));
+    }
+
+    if (fs.existsSync(agentsPath)) {
+      try {
+        fs.rmSync(agentsPath, {
+          recursive: true,
+          force: false,
+          maxRetries: 2,
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          error: `skill-uninstall-failed:${String(error)}`,
+          skillName: normalized,
+          stdout,
+          stderr,
+        };
+      }
+    }
+  }
+
+  if (installedInCodex && fs.existsSync(codexPath)) {
+    try {
+      fs.rmSync(codexPath, {
+        recursive: true,
+        force: false,
+        maxRetries: 2,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        error: `skill-uninstall-failed:${String(error)}`,
+        skillName: normalized,
+        stdout,
+        stderr,
+      };
+    }
+  }
+
+  if (fs.existsSync(codexPath) || fs.existsSync(agentsPath)) {
     return {
       ok: false,
-      error: `skill-uninstall-failed:${String(error)}`,
+      error: "skill-uninstall-finished-but-present",
       skillName: normalized,
+      stdout,
+      stderr,
     };
   }
 
@@ -2660,6 +2720,8 @@ function uninstallSkill(skillName) {
     ok: true,
     skillName: normalized,
     action: "uninstalled",
+    stdout,
+    stderr,
   };
 }
 

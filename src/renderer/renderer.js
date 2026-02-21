@@ -371,6 +371,12 @@ function formatSkillActionError(errorCode) {
   if (code === "managed-skill") {
     return "시스템 스킬은 삭제할 수 없습니다";
   }
+  if (code === "skill-uninstall-finished-but-present") {
+    return "스킬이 완전히 삭제되지 않았습니다";
+  }
+  if (code.startsWith("skill-uninstall-failed:")) {
+    return "스킬 삭제 중 오류가 발생했습니다";
+  }
   if (code === "unsupported-skill") {
     return "지원되지 않는 스킬입니다";
   }
