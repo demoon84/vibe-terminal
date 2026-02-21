@@ -3478,14 +3478,25 @@ app.whenReady().then(() => {
   }
 
   function resolveAgentsPolicySourcePath() {
-    const appPolicyPath = path.join(app.getAppPath(), "AGENTS.md");
-    if (fs.existsSync(appPolicyPath)) {
-      return appPolicyPath;
+    const candidates = [];
+
+    // Packaged apps should prefer the resource copy shipped via electron-builder extraResources.
+    if (app.isPackaged && typeof process.resourcesPath === "string" && process.resourcesPath.trim()) {
+      candidates.push(path.join(process.resourcesPath, "AGENTS.md"));
     }
-    const fallbackPath = path.join(process.cwd(), "AGENTS.md");
-    if (fs.existsSync(fallbackPath)) {
-      return fallbackPath;
+
+    candidates.push(path.join(app.getAppPath(), "AGENTS.md"));
+    candidates.push(path.join(process.cwd(), "AGENTS.md"));
+
+    for (const candidatePath of candidates) {
+      if (typeof candidatePath !== "string" || !candidatePath) {
+        continue;
+      }
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
     }
+
     return "";
   }
 
