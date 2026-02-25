@@ -548,6 +548,69 @@ function getSkillInstallerScriptsDir() {
   return path.join(getCodexSkillsDir(), ".system", "skill-installer", "scripts");
 }
 
+function getSkillInstallPaths(skillName) {
+  const normalized = toSafeSkillName(skillName);
+  if (!normalized) {
+    return {
+      normalized: "",
+      codexPath: "",
+      agentsPath: "",
+    };
+  }
+  return {
+    normalized,
+    codexPath: path.join(getCodexSkillsDir(), normalized),
+    agentsPath: path.join(getAgentsSkillsDir(), normalized),
+  };
+}
+
+function hasSkillManifest(skillPath) {
+  const normalizedPath = String(skillPath || "").trim();
+  if (!normalizedPath) {
+    return false;
+  }
+  return fs.existsSync(path.join(normalizedPath, "SKILL.md"));
+}
+
+function resolveInstalledSkillPath(skillName) {
+  const paths = getSkillInstallPaths(skillName);
+  if (!paths.normalized) {
+    return "";
+  }
+  if (hasSkillManifest(paths.codexPath)) {
+    return paths.codexPath;
+  }
+  if (hasSkillManifest(paths.agentsPath)) {
+    return paths.agentsPath;
+  }
+  return "";
+}
+
+function cleanupStaleSkillInstallPaths(skillName) {
+  const paths = getSkillInstallPaths(skillName);
+  if (!paths.normalized) {
+    return;
+  }
+
+  for (const candidate of [paths.codexPath, paths.agentsPath]) {
+    if (!candidate || !fs.existsSync(candidate)) {
+      continue;
+    }
+    if (hasSkillManifest(candidate)) {
+      continue;
+    }
+    try {
+      fs.rmSync(candidate, {
+        recursive: true,
+        force: true,
+        maxRetries: 2,
+      });
+    } catch (_error) {
+      // Best-effort cleanup only.
+    }
+  }
+}
+
 function toSafeSkillName(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
@@ -1264,14 +1327,71 @@ function openNodeInstallPage() {
 }
 
 
-const KNOWN_EDITORS = [
-  { id: "idea", name: "IntelliJ IDEA", app: "IntelliJ IDEA.app", command: ["open", "-a", "IntelliJ IDEA"] },
-  { id: "vscode", name: "VS Code", app: "Visual Studio Code.app", command: ["code"] },
-  { id: "cursor", name: "Cursor", app: "Cursor.app", command: ["cursor"] },
-  { id: "finder", name: "Finder", app: null, command: ["open"] },
-  { id: "antigravity", name: "Antigravity", app: "Antigravity.app", command: ["open", "-a", "Antigravity"] },
-  { id: "xcode", name: "Xcode", app: "Xcode.app", command: ["open", "-a", "Xcode"] },
-];
+function getWindowsProgramsDir() {
+  const localAppData = String(process.env.LOCALAPPDATA || "").trim();
+  if (localAppData) {
+    return path.join(localAppData, "Programs");
+  }
+  return path.join(os.homedir(), "AppData", "Local", "Programs");
+}
+
+function buildKnownEditors() {
+  if (process.platform === "win32") {
+    const programsDir = getWindowsProgramsDir();
+    return [
+      {
+        id: "cursor",
+        name: "Cursor",
+        command: ["cursor"],
+        fallbackExecutables: [
+          path.join(programsDir, "cursor", "Cursor.exe"),
+        ],
+      },
+      {
+        id: "vscode",
+        name: "VS Code",
+        command: ["code"],
+        fallbackExecutables: [
+          path.join(programsDir, "Microsoft VS Code", "Code.exe"),
+          path.join(programsDir, "VS Code", "Code.exe"),
+        ],
+      },
+      {
+        id: "windsurf",
+        name: "Windsurf",
+        command: ["windsurf"],
+        fallbackExecutables: [
+          path.join(programsDir, "Windsurf", "Windsurf.exe"),
+        ],
+      },
+      {
+        id: "explorer",
+        name: "Explorer",
+        command: ["explorer.exe"],
+        alwaysVisible: true,
+      },
+    ];
+  }
+
+  if (process.platform === "darwin") {
+    return [
+      { id: "idea", name: "IntelliJ IDEA", app: "IntelliJ IDEA.app", command: ["open", "-a", "IntelliJ IDEA"] },
+      { id: "vscode", name: "VS Code", app: "Visual Studio Code.app", command: ["open", "-a", "Visual Studio Code"] },
+      { id: "cursor", name: "Cursor", app: "Cursor.app", command: ["open", "-a", "Cursor"] },
+      { id: "finder", name: "Finder", app: null, command: ["open"] },
+      { id: "antigravity", name: "Antigravity", app: "Antigravity.app", command: ["open", "-a", "Antigravity"] },
+      { id: "xcode", name: "Xcode", app: "Xcode.app", command: ["open", "-a", "Xcode"] },
+    ];
+  }
+
+  return [
+    { id: "cursor", name: "Cursor", command: ["cursor"] },
+    { id: "vscode", name: "VS Code", command: ["code"] },
+    { id: "file-manager", name: "File Manager", command: ["xdg-open"] },
+  ];
+}
+
+const KNOWN_EDITORS = buildKnownEditors();
 
 let cachedInstalledEditors = null;
 
@@ -1319,9 +1439,65 @@ async function getMacAppIconBase64(appPath) {
   }
 }
 
+function resolveEditorLaunchCommand(editor) {
+  if (!editor || !Array.isArray(editor.command) || editor.command.length === 0) {
+    return null;
+  }
+
+  const [firstCommand, ...restArgs] = editor.command;
+  const primaryCommand = String(firstCommand || "").trim();
+  if (!primaryCommand) {
+    return null;
+  }
+
+  if (path.isAbsolute(primaryCommand) && fs.existsSync(primaryCommand)) {
+    return {
+      command: primaryCommand,
+      args: restArgs,
+    };
+  }
+
+  const locations = getCommandLocations(primaryCommand);
+  if (locations.length > 0) {
+    return {
+      command: locations[0],
+      args: restArgs,
+    };
+  }
+
+  const fallbackExecutables = Array.isArray(editor.fallbackExecutables)
+    ? editor.fallbackExecutables
+    : [];
+  for (const candidate of fallbackExecutables) {
+    const candidatePath = String(candidate || "").trim();
+    if (!candidatePath || !path.isAbsolute(candidatePath)) {
+      continue;
+    }
+    if (fs.existsSync(candidatePath)) {
+      return {
+        command: candidatePath,
+        args: restArgs,
+      };
+    }
+  }
+
+  return null;
+}
+
 async function queryInstalledEditors() {
   if (cachedInstalledEditors) {
     return cachedInstalledEditors;
+  }
+
+  if (process.platform !== "darwin") {
+    const installed = [];
+    for (const editor of KNOWN_EDITORS) {
+      if (editor.alwaysVisible || resolveEditorLaunchCommand(editor)) {
+        installed.push({ id: editor.id, name: editor.name });
+      }
+    }
+    cachedInstalledEditors = installed;
+    return installed;
   }
 
   const installed = [];
@@ -1389,35 +1565,75 @@ async function queryInstalledEditors() {
   return installed;
 }
 
-function openInEditor(editorId, cwd) {
+async function openInEditor(editorId, cwd) {
   const editor = KNOWN_EDITORS.find((e) => e.id === editorId);
   if (!editor) {
     return { ok: false, error: "unknown-editor" };
   }
 
-  const targetPath = typeof cwd === "string" && cwd.trim() ? cwd.trim() : process.cwd();
+  const requestedPath = typeof cwd === "string" && cwd.trim() ? cwd.trim() : process.cwd();
+  const targetPath = fs.existsSync(requestedPath) ? requestedPath : process.cwd();
 
   try {
-    if (editor.app && editor.command[0] === "open") {
-      // Use macOS open -a for apps that don't have a CLI command
-      spawn("open", ["-a", editor.app, targetPath], {
-        cwd: targetPath,
-        env: withAugmentedPath(process.env),
-        stdio: "ignore",
-        detached: true,
-        shell: false,
-      }).unref();
-    } else {
-      // Use the CLI command directly
-      const [cmd, ...args] = editor.command;
-      spawn(cmd, [...args, targetPath], {
-        cwd: targetPath,
-        env: withAugmentedPath(process.env),
-        stdio: "ignore",
-        detached: true,
-        shell: false,
-      }).unref();
+    if (process.platform === "win32" && editor.id === "explorer") {
+      const openError = await shell.openPath(targetPath);
+      if (openError) {
+        return {
+          ok: false,
+          error: `editor-launch-failed:${openError}`,
+        };
+      }
+      return { ok: true };
     }
+
+    if (editor.app && editor.command[0] === "open") {
+      const result = spawnSync("open", ["-a", editor.app, targetPath], {
+        cwd: targetPath || app.getPath("home"),
+        env: withAugmentedPath(process.env),
+        windowsHide: true,
+        stdio: "ignore",
+        shell: false,
+      });
+      if (result.error) {
+        return {
+          ok: false,
+          error: `editor-launch-failed:${String(result.error.message || result.error)}`,
+        };
+      }
+      if (result.status !== 0) {
+        return {
+          ok: false,
+          error: `editor-exit-${String(result.status)}`,
+        };
+      }
+      return { ok: true };
+    }
+
+    const launch = resolveEditorLaunchCommand(editor);
+    if (!launch) {
+      return { ok: false, error: "editor-launch-command-not-found" };
+    }
+
+    const result = spawnSync(launch.command, [...launch.args, targetPath], {
+      cwd: targetPath || app.getPath("home"),
+      env: withAugmentedPath(process.env),
+      windowsHide: true,
+      stdio: "ignore",
+      shell: false,
+    });
+    if (result.error) {
+      return {
+        ok: false,
+        error: `editor-launch-failed:${String(result.error.message || result.error)}`,
+      };
+    }
+    if (result.status !== 0) {
+      return {
+        ok: false,
+        error: `editor-exit-${String(result.status)}`,
+      };
+    }
+
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2437,14 +2653,15 @@ function installCuratedSkill(skillName) {
     };
   }
 
-  const installedPath = path.join(getCodexSkillsDir(), normalized);
-  if (fs.existsSync(installedPath)) {
+  const installedPath = resolveInstalledSkillPath(normalized);
+  if (installedPath) {
     return {
       ok: true,
       skillName: normalized,
       action: "already-installed",
     };
   }
+  cleanupStaleSkillInstallPaths(normalized);
 
   const curated = queryCuratedSkillRows();
   const supported = curated.rows.some((row) => row.name === normalized);
@@ -2484,6 +2701,15 @@ function installCuratedSkill(skillName) {
   );
   const stdout = trimTail(String(result.stdout || ""));
   const stderr = trimTail(String(result.stderr || ""));
+  if (result.error) {
+    return {
+      ok: false,
+      error: "skill-install-spawn-failed",
+      skillName: normalized,
+      stdout,
+      stderr: trimTail(`${stderr}\n${String(result.error.message || result.error)}`),
+    };
+  }
   if (result.status !== 0) {
     return {
       ok: false,
@@ -2494,8 +2720,8 @@ function installCuratedSkill(skillName) {
     };
   }
 
-  const installed = fs.existsSync(installedPath);
-  if (!installed) {
+  const nextInstalledPath = resolveInstalledSkillPath(normalized);
+  if (!nextInstalledPath) {
     return {
       ok: false,
       error: "skill-install-finished-but-missing",
@@ -2531,14 +2757,15 @@ function installSkillsShSkill(skillName, installRepo) {
     };
   }
 
-  const installedPath = path.join(getCodexSkillsDir(), normalized);
-  if (fs.existsSync(installedPath)) {
+  const installedPath = resolveInstalledSkillPath(normalized);
+  if (installedPath) {
     return {
       ok: true,
       skillName: normalized,
       action: "already-installed",
     };
   }
+  cleanupStaleSkillInstallPaths(normalized);
 
   const npxCommand = resolveNpxCommand();
   if (!npxCommand) {
@@ -2572,6 +2799,15 @@ function installSkillsShSkill(skillName, installRepo) {
   );
   const stdout = trimTail(String(result.stdout || ""));
   const stderr = trimTail(String(result.stderr || ""));
+  if (result.error) {
+    return {
+      ok: false,
+      error: "skills-install-spawn-failed",
+      skillName: normalized,
+      stdout,
+      stderr: trimTail(`${stderr}\n${String(result.error.message || result.error)}`),
+    };
+  }
   if (result.status !== 0) {
     return {
       ok: false,
@@ -2582,8 +2818,8 @@ function installSkillsShSkill(skillName, installRepo) {
     };
   }
 
-  const installed = fs.existsSync(installedPath);
-  if (!installed) {
+  const nextInstalledPath = resolveInstalledSkillPath(normalized);
+  if (!nextInstalledPath) {
     return {
       ok: false,
       error: "skills-install-finished-but-missing",

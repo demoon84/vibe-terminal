@@ -383,6 +383,9 @@ function formatSkillActionError(errorCode) {
   if (code === "skill-install-script-not-found") {
     return "스킬 설치 스크립트를 찾을 수 없습니다";
   }
+  if (code === "skill-install-spawn-failed" || code === "skills-install-spawn-failed") {
+    return "스킬 설치 실행에 실패했습니다";
+  }
   if (code === "curated-source-unavailable") {
     return "기본 추천 목록을 불러오지 못했습니다";
   }
@@ -400,6 +403,23 @@ function formatSkillActionError(errorCode) {
   }
   if (code === "invalid-skill-name" || code === "invalid-payload:skillName-format") {
     return "잘못된 스킬 이름입니다";
+  }
+  return code || "unknown";
+}
+
+function formatOpenInEditorError(errorCode) {
+  const code = String(errorCode || "");
+  if (code === "unknown-editor") {
+    return "알 수 없는 에디터입니다";
+  }
+  if (code === "editor-launch-command-not-found") {
+    return "에디터 실행 경로를 찾지 못했습니다";
+  }
+  if (code.startsWith("editor-launch-failed:")) {
+    return "에디터 실행 중 오류가 발생했습니다";
+  }
+  if (code.startsWith("editor-exit-")) {
+    return "에디터 실행이 비정상 종료되었습니다";
   }
   return code || "unknown";
 }
@@ -3017,9 +3037,11 @@ function setAgentCommandSelection(view, command) {
 
 const EDITOR_ICONS = {
   finder: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#007AFF"/><path d="M4 6.5C4 6.5 5 7 6 7C7 7 8 6.5 8 6.5" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M10 5.5v2" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M12.5 5.5v2" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M4.5 10c1 1.5 6 1.5 7 0" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  explorer: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="3" width="14" height="10" rx="2" fill="#d5a037"/><path d="M1 6h14" stroke="#8a6519" stroke-width="1"/><path d="M2.5 5h4l1 1h6.5" stroke="#f5c462" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   terminal: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1e1e1e"/><rect x="0.5" y="0.5" width="15" height="15" rx="3.5" stroke="#7e7e7e"/><path d="M4 5L7 8L4 11" stroke="#4AF626" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 11H12" stroke="#4AF626" stroke-width="1.5" stroke-linecap="round"/></svg>',
   vscode: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11 2L4 7L11 12V2Z" fill="#0066b8"/><path d="M4 7l7 5-2.5 3L2 11l2-4z" fill="#007acc"/><path d="M11 2L4 7 2 5l6.5-4L11 2z" fill="#1f9ae0"/><path d="M11 2v10l3-2.5V4.5L11 2z" fill="#24292e"/></svg>',
   cursor: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1e1e1e"/><path d="M11 11L6 11V6" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 11L5 5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  windsurf: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#0f172a"/><path d="M2 10c1.8-2.6 3.3-3.9 4.7-3.9 1.3 0 2 .9 2.6 1.7.7.9 1.2 1.5 2.1 1.5.8 0 1.6-.5 2.6-1.7" stroke="#67e8f9" stroke-width="1.2" stroke-linecap="round"/><path d="M2.2 12.2c1.5-1.6 2.8-2.4 3.9-2.4 1 0 1.7.6 2.3 1.1.7.6 1.4 1.2 2.5 1.2 1 0 2-.5 3.1-1.6" stroke="#22d3ee" stroke-width="1.2" stroke-linecap="round"/></svg>',
   idea: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#000000"/><rect x="2" y="2" width="12" height="12" fill="url(#paint0_linear)"/><path d="M5 11H7V5H5V11ZM9 11H11V8H9V11ZM9 6.5H11V5H9V6.5Z" fill="white"/><defs><linearGradient id="paint0_linear" x1="2" y1="2" x2="14" y2="14" gradientUnits="userSpaceOnUse"><stop stop-color="#FE2857"/><stop offset="1" stop-color="#05C9F9"/></linearGradient></defs></svg>',
   xcode: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1c75db"/><path d="M4 12l2.5-8L12 12M5.5 8.5h5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   fallback: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#555555"/><path d="M8 4L4 12h8L8 4z" fill="white"/></svg>',
@@ -3377,7 +3399,7 @@ function createPaneView(pane, index, preset, sessionMap) {
       if (result?.ok) {
         setStatusLine(`${view.openButtonText.textContent}에서 열기 완료`);
       } else {
-        setStatusLine(`열기 실패: ${String(result?.error || "unknown")}`);
+        setStatusLine(`열기 실패: ${formatOpenInEditorError(result?.error)}`);
       }
     } catch (error) {
       setStatusLine(`열기 실패: ${String(error)}`);

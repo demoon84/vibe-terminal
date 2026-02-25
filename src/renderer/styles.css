@@ -1053,7 +1053,7 @@ button:hover {
 .agents-policy-editor {
   width: 100%;
   min-height: 360px;
-  resize: vertical;
+  resize: none;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(0, 0, 0, 0.28);

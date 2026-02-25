@@ -8,6 +8,11 @@
 - 변경 파일: `src/renderer/styles.css`
 - 검증 결과: `rg -n -- "--scrollbar-size|\\*::-webkit-scrollbar|\\.skill-manager-card|\\.agents-policy-card|xterm-viewport" src/renderer/styles.css`로 전역/대상 영역 규칙 반영 확인, 수동 검증 절차(스킬관리/규칙설정/터미널 스크롤바 표시 및 hover 스타일 일치 여부 확인) 정의.
 
+### 2) 스킬 재설치/에디터 열기/규칙 입력란 리사이즈 문제 수정
+- 요청 요약: 스킬 삭제 후 재설치 실패를 완화하고, Windows 에디터 열기 실패를 수정하며, 규칙 설정 입력란의 리사이즈를 비활성화.
+- 변경 파일: `src/main/main.js`, `src/renderer/renderer.js`, `src/renderer/styles.css`
+- 검증 결과: `node --check src/main/main.js` 통과, `node --check src/renderer/renderer.js` 통과, `rg -n -- "resize: none|buildKnownEditors|resolveEditorLaunchCommand|cleanupStaleSkillInstallPaths|resolveInstalledSkillPath" src/renderer/styles.css src/main/main.js src/renderer/renderer.js`로 핵심 수정점 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
