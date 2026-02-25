@@ -23,6 +23,11 @@
 - 변경 파일: `src/main/main.js`
 - 검증 결과: `node --check src/main/main.js` 통과, `rg -n "id: \"idea\"|buildKnownEditors" src/main/main.js`로 Windows 목록 선두 배치 확인.
 
+### 5) 에디터 목록 조회 실패 시 UI fallback 목록 표시
+- 요청 요약: 에디터 IPC 응답이 비어 있거나 실패해도 에디터 목록이 비어 보이지 않도록 기본 목록을 표시.
+- 변경 파일: `src/renderer/renderer.js`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "getEditorMenuFallbackList|populateEditorMenu" src/renderer/renderer.js`로 fallback 경로 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.

@@ -3049,6 +3049,16 @@ const EDITOR_ICONS = {
 
 let cachedEditorList = null;
 
+function getEditorMenuFallbackList() {
+  return [
+    { id: "idea", name: "IntelliJ IDEA" },
+    { id: "cursor", name: "Cursor" },
+    { id: "vscode", name: "VS Code" },
+    { id: "windsurf", name: "Windsurf" },
+    { id: "explorer", name: "Explorer" },
+  ];
+}
+
 async function populateEditorMenu(view) {
   if (!view.editorMenu || !view.openButtonIcon || !view.openButtonText) {
     return;
@@ -3102,22 +3112,27 @@ async function populateEditorMenu(view) {
     }
   };
 
-  if (cachedEditorList) {
-    renderItems(cachedEditorList);
+  if (Array.isArray(cachedEditorList)) {
+    renderItems(cachedEditorList.length > 0 ? cachedEditorList : getEditorMenuFallbackList());
     return;
   }
 
   if (!api?.app?.process?.queryEditors) {
+    cachedEditorList = getEditorMenuFallbackList();
+    renderItems(cachedEditorList);
     return;
   }
   try {
     const result = await api.app.process.queryEditors();
-    if (result?.ok && Array.isArray(result.editors)) {
+    if (result?.ok && Array.isArray(result.editors) && result.editors.length > 0) {
       cachedEditorList = result.editors;
-      renderItems(cachedEditorList);
+    } else {
+      cachedEditorList = getEditorMenuFallbackList();
     }
+    renderItems(cachedEditorList);
   } catch (_error) {
-    // Silently ignore.
+    cachedEditorList = getEditorMenuFallbackList();
+    renderItems(cachedEditorList);
   }
 }
 
