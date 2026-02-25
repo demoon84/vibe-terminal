@@ -18,6 +18,11 @@
 - 변경 파일: `src/main/main.js`
 - 검증 결과: `node --check src/main/main.js` 통과, `rg -n "openPathInWindowsEditorFallback|APP_EDIT_AGENTS_POLICY|spawnDetachedCommand|async function openInEditor" src/main/main.js`로 fallback/실행 경로 반영 확인.
 
+### 4) Windows 에디터 목록에 IntelliJ IDEA 우선 노출
+- 요청 요약: 에디터 메뉴에서 IntelliJ IDEA를 첫 번째 항목으로 보이도록 순서를 조정.
+- 변경 파일: `src/main/main.js`
+- 검증 결과: `node --check src/main/main.js` 통과, `rg -n "id: \"idea\"|buildKnownEditors" src/main/main.js`로 Windows 목록 선두 배치 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.

@@ -1381,7 +1381,20 @@ function getWindowsProgramsDir() {
 function buildKnownEditors() {
   if (process.platform === "win32") {
     const programsDir = getWindowsProgramsDir();
+    const programFiles = String(process.env.ProgramFiles || "C:\\Program Files").trim();
+    const programFilesX86 = String(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)").trim();
     return [
+      {
+        id: "idea",
+        name: "IntelliJ IDEA",
+        command: ["idea64.exe"],
+        fallbackExecutables: [
+          path.join(programsDir, "IntelliJ IDEA", "bin", "idea64.exe"),
+          path.join(programFiles, "JetBrains", "IntelliJ IDEA", "bin", "idea64.exe"),
+          path.join(programFiles, "JetBrains", "IntelliJ IDEA Community Edition", "bin", "idea64.exe"),
+          path.join(programFilesX86, "JetBrains", "IntelliJ IDEA", "bin", "idea64.exe"),
+        ],
+      },
       {
         id: "cursor",
         name: "Cursor",
