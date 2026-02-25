@@ -17,10 +17,44 @@
   --terminal-font-size: 12px;
   --split-line: #2a2a2a;
   --split-line-strong: #323232;
+  --scrollbar-size: 10px;
+  --scrollbar-track: #1e1e1e;
+  --scrollbar-thumb: rgba(121, 121, 121, 0.56);
+  --scrollbar-thumb-hover: rgba(121, 121, 121, 0.74);
+  --scrollbar-thumb-active: rgba(154, 154, 154, 0.82);
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: var(--scrollbar-thumb-active);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
 }
 
 html,
@@ -820,8 +854,7 @@ button:hover {
 .terminal-host .xterm-viewport {
   overflow-y: auto !important;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(121, 121, 121, 0.62) #1e1e1e;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   background-color: #1e1e1e !important;
   user-select: text;
   -webkit-user-select: text;
@@ -832,30 +865,30 @@ button:hover {
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar-track {
-  background: #1e1e1e;
+  background: var(--scrollbar-track);
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(121, 121, 121, 0.56);
-  border: 2px solid #1e1e1e;
+  background: var(--scrollbar-thumb);
+  border: 2px solid var(--scrollbar-track);
   border-radius: 999px;
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgba(121, 121, 121, 0.74);
+  background: var(--scrollbar-thumb-hover);
 }
 
 .terminal-host .xterm .xterm-scrollable-element>.scrollbar {
-  background: #1e1e1e !important;
+  background: var(--scrollbar-track) !important;
 }
 
 .terminal-host .xterm .xterm-scrollable-element>.scrollbar.vertical {
-  width: 8px !important;
+  width: var(--scrollbar-size) !important;
 }
 
 .terminal-host .xterm .xterm-scrollable-element>.scrollbar.horizontal {
@@ -864,9 +897,14 @@ button:hover {
 }
 
 .terminal-host .xterm .xterm-scrollable-element>.scrollbar.vertical>.slider {
-  width: 8px !important;
+  width: var(--scrollbar-size) !important;
   min-height: 20px;
   border-radius: 999px;
+  background: var(--scrollbar-thumb) !important;
+}
+
+.terminal-host .xterm .xterm-scrollable-element>.scrollbar.vertical:hover>.slider {
+  background: var(--scrollbar-thumb-hover) !important;
 }
 
 .terminal-host .xterm .xterm-scrollable-element>.scrollbar.horizontal>.slider {
@@ -986,12 +1024,13 @@ button:hover {
   overflow-y: auto;
   overflow-x: hidden;
   text-align: left;
-  scrollbar-width: thin;
 }
 
 .agents-policy-card {
   width: min(980px, calc(100vw - 24px));
   max-height: min(86vh, 920px);
+  overflow-y: auto;
+  overflow-x: hidden;
   text-align: left;
   display: flex;
   flex-direction: column;

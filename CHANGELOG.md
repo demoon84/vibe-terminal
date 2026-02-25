@@ -2,6 +2,12 @@
 
 이 문서는 작업 이력을 기록한다.
 
+## 2026-02-26
+### 1) 스킬관리/규칙설정/앱 전역 스크롤바 스타일 통일
+- 요청 요약: 스킬관리 영역, 규칙 설정 스크롤 영역, 앱 전체 스크롤바를 동일한 커스텀 스타일로 통일.
+- 변경 파일: `src/renderer/styles.css`
+- 검증 결과: `rg -n -- "--scrollbar-size|\\*::-webkit-scrollbar|\\.skill-manager-card|\\.agents-policy-card|xterm-viewport" src/renderer/styles.css`로 전역/대상 영역 규칙 반영 확인, 수동 검증 절차(스킬관리/규칙설정/터미널 스크롤바 표시 및 hover 스타일 일치 여부 확인) 정의.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
