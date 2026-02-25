@@ -1540,6 +1540,9 @@ function clearPaneViews() {
     if (view.terminalHost && typeof view.handleWheelCapture === "function") {
       view.terminalHost.removeEventListener("wheel", view.handleWheelCapture, true);
     }
+    if (typeof view.handleEditorMenuOutsideClick === "function") {
+      document.removeEventListener("click", view.handleEditorMenuOutsideClick);
+    }
     view.terminal?.dispose();
   }
   state.paneViews.clear();
@@ -3351,6 +3354,7 @@ function createPaneView(pane, index, preset, sessionMap) {
     lastRequestedResize: null,
     pendingSigintExpiresAt: 0,
     pendingSigintTimer: null,
+    handleEditorMenuOutsideClick: null,
     clipboardPreviewContainer,
     clipboardPreviewImage,
     clipboardPreviewName,
@@ -3394,6 +3398,10 @@ function createPaneView(pane, index, preset, sessionMap) {
   openButton.addEventListener("click", async (event) => {
     event.stopPropagation();
 
+    if (editorMenu.childElementCount <= 1) {
+      await populateEditorMenu(view);
+    }
+
     // Default click opens/closes the list for reliability.
     const forceDirectOpen = Boolean(event.shiftKey || event.ctrlKey || event.metaKey);
     if (!forceDirectOpen) {
@@ -3426,11 +3434,13 @@ function createPaneView(pane, index, preset, sessionMap) {
   });
 
   // Close menu when clicking outside
-  document.addEventListener("click", (event) => {
+  const handleEditorMenuOutsideClick = (event) => {
     if (!editorGroup.contains(event.target)) {
       editorMenu.classList.remove("is-open");
     }
-  });
+  };
+  view.handleEditorMenuOutsideClick = handleEditorMenuOutsideClick;
+  document.addEventListener("click", handleEditorMenuOutsideClick);
 
   populateEditorMenu(view);
   codexButton.addEventListener("click", async (event) => {

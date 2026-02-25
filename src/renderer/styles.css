@@ -445,6 +445,8 @@ button:hover {
 }
 
 .pane-header {
+  position: relative;
+  z-index: 12;
   min-height: 34px;
   display: flex;
   align-items: stretch;
@@ -578,6 +580,7 @@ button:hover {
 .pane-editor-group {
   position: relative;
   display: inline-flex;
+  z-index: 20;
 }
 
 .pane-open-btn {
@@ -625,7 +628,7 @@ button:hover {
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
   padding: 4px;
-  z-index: 100;
+  z-index: 240;
   display: none;
   flex-direction: column;
 }
@@ -712,6 +715,7 @@ button:hover {
 
 .pane-body {
   position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   background: #1e1e1e;

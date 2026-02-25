@@ -33,6 +33,11 @@
 - 변경 파일: `src/renderer/renderer.js`
 - 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "EDITOR_QUERY_TIMEOUT_MS|Promise.race|forceDirectOpen|populateEditorMenu" src/renderer/renderer.js`로 즉시 렌더링/타임아웃/클릭 동작 반영 확인.
 
+### 7) 분할 변경 후 에디터 드롭다운 비노출 보강
+- 요청 요약: 분할 변경 이후 에디터 목록이 안 보이는 문제를 완화하기 위해 드롭다운 레이어 우선순위와 메뉴 재생성/정리 로직을 보강.
+- 변경 파일: `src/renderer/styles.css`, `src/renderer/renderer.js`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "pane-header|pane-editor-group|pane-editor-menu|handleEditorMenuOutsideClick|childElementCount <= 1" src/renderer/styles.css src/renderer/renderer.js`로 관련 보강점 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
