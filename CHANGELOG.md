@@ -13,6 +13,11 @@
 - 변경 파일: `src/main/main.js`, `src/renderer/renderer.js`, `src/renderer/styles.css`
 - 검증 결과: `node --check src/main/main.js` 통과, `node --check src/renderer/renderer.js` 통과, `rg -n -- "resize: none|buildKnownEditors|resolveEditorLaunchCommand|cleanupStaleSkillInstallPaths|resolveInstalledSkillPath" src/renderer/styles.css src/main/main.js src/renderer/renderer.js`로 핵심 수정점 반영 확인.
 
+### 3) 규칙 설정 외부 편집기 열기 Windows fallback 보강
+- 요청 요약: `규칙 설정 > 외부 편집기`가 기본 연결 앱 실패 시에도 Windows에서 열리도록 fallback 실행 경로를 추가.
+- 변경 파일: `src/main/main.js`
+- 검증 결과: `node --check src/main/main.js` 통과, `rg -n "openPathInWindowsEditorFallback|APP_EDIT_AGENTS_POLICY|spawnDetachedCommand|async function openInEditor" src/main/main.js`로 fallback/실행 경로 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.

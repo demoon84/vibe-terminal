@@ -1326,6 +1326,49 @@ function openNodeInstallPage() {
   }
 }
 
+async function openPathInWindowsEditorFallback(filePath) {
+  const normalizedFilePath = String(filePath || "").trim();
+  if (!normalizedFilePath) {
+    return { ok: false, error: "invalid-path" };
+  }
+
+  const preferredEditorIds = ["cursor", "vscode", "windsurf"];
+  let lastError = "editor-launch-command-not-found";
+  for (const editorId of preferredEditorIds) {
+    const editor = KNOWN_EDITORS.find((item) => item.id === editorId);
+    if (!editor) {
+      continue;
+    }
+    const launch = resolveEditorLaunchCommand(editor);
+    if (!launch) {
+      continue;
+    }
+    const result = await spawnDetachedCommand(
+      launch.command,
+      [...launch.args, normalizedFilePath],
+      { cwd: path.dirname(normalizedFilePath) },
+    );
+    if (result.ok) {
+      return { ok: true, editorId };
+    }
+    lastError = result.error || lastError;
+  }
+
+  const notepadResult = await spawnDetachedCommand(
+    "notepad.exe",
+    [normalizedFilePath],
+    { cwd: path.dirname(normalizedFilePath) },
+  );
+  if (notepadResult.ok) {
+    return { ok: true, editorId: "notepad" };
+  }
+
+  return {
+    ok: false,
+    error: notepadResult.error || lastError,
+  };
+}
+
 
 function getWindowsProgramsDir() {
   const localAppData = String(process.env.LOCALAPPDATA || "").trim();
@@ -1484,6 +1527,68 @@ function resolveEditorLaunchCommand(editor) {
   return null;
 }
 
+function toShortError(error) {
+  if (!error) {
+    return "";
+  }
+  return String(error?.message || error).trim();
+}
+
+function spawnDetachedCommand(command, args = [], options = {}) {
+  return new Promise((resolve) => {
+    const commandText = String(command || "").trim();
+    if (!commandText) {
+      resolve({ ok: false, error: "editor-launch-command-not-found" });
+      return;
+    }
+
+    const launchArgs = Array.isArray(args)
+      ? args.map((arg) => String(arg ?? ""))
+      : [];
+    const launchCwd = String(options.cwd || "").trim() || app.getPath("home");
+
+    try {
+      const child = spawn(commandText, launchArgs, {
+        cwd: launchCwd,
+        env: withAugmentedPath(process.env),
+        windowsHide: true,
+        stdio: "ignore",
+        detached: true,
+        shell: false,
+      });
+
+      let settled = false;
+      child.once("error", (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve({
+          ok: false,
+          error: `editor-launch-failed:${toShortError(error) || "spawn-error"}`,
+        });
+      });
+      child.once("spawn", () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          child.unref();
+        } catch (_error) {
+          // Best effort.
+        }
+        resolve({ ok: true });
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        error: `editor-launch-failed:${toShortError(error) || "spawn-throw"}`,
+      });
+    }
+  });
+}
+
 async function queryInstalledEditors() {
   if (cachedInstalledEditors) {
     return cachedInstalledEditors;
@@ -1587,26 +1692,9 @@ async function openInEditor(editorId, cwd) {
     }
 
     if (editor.app && editor.command[0] === "open") {
-      const result = spawnSync("open", ["-a", editor.app, targetPath], {
+      return await spawnDetachedCommand("open", ["-a", editor.app, targetPath], {
         cwd: targetPath || app.getPath("home"),
-        env: withAugmentedPath(process.env),
-        windowsHide: true,
-        stdio: "ignore",
-        shell: false,
       });
-      if (result.error) {
-        return {
-          ok: false,
-          error: `editor-launch-failed:${String(result.error.message || result.error)}`,
-        };
-      }
-      if (result.status !== 0) {
-        return {
-          ok: false,
-          error: `editor-exit-${String(result.status)}`,
-        };
-      }
-      return { ok: true };
     }
 
     const launch = resolveEditorLaunchCommand(editor);
@@ -1614,27 +1702,9 @@ async function openInEditor(editorId, cwd) {
       return { ok: false, error: "editor-launch-command-not-found" };
     }
 
-    const result = spawnSync(launch.command, [...launch.args, targetPath], {
+    return await spawnDetachedCommand(launch.command, [...launch.args, targetPath], {
       cwd: targetPath || app.getPath("home"),
-      env: withAugmentedPath(process.env),
-      windowsHide: true,
-      stdio: "ignore",
-      shell: false,
     });
-    if (result.error) {
-      return {
-        ok: false,
-        error: `editor-launch-failed:${String(result.error.message || result.error)}`,
-      };
-    }
-    if (result.status !== 0) {
-      return {
-        ok: false,
-        error: `editor-exit-${String(result.status)}`,
-      };
-    }
-
-    return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -4000,11 +4070,23 @@ app.whenReady().then(() => {
     try {
       const userDataPolicyPath = prepareAgentsPolicyPath();
       if (fs.existsSync(userDataPolicyPath)) {
-        const error = await shell.openPath(userDataPolicyPath);
-        if (error) {
-          return { ok: false, error };
+        const defaultOpenError = await shell.openPath(userDataPolicyPath);
+        if (!defaultOpenError) {
+          return { ok: true };
         }
-        return { ok: true };
+
+        if (process.platform === "win32") {
+          const fallback = await openPathInWindowsEditorFallback(userDataPolicyPath);
+          if (fallback.ok) {
+            return { ok: true, openedBy: fallback.editorId || "fallback" };
+          }
+          return {
+            ok: false,
+            error: `default-open-failed:${defaultOpenError}; fallback-failed:${fallback.error || "unknown"}`,
+          };
+        }
+
+        return { ok: false, error: defaultOpenError };
       }
       return { ok: false, error: "AGENTS.md not found in user data directory." };
     } catch (error) {
