@@ -26,6 +26,7 @@ const AGENT_AUTO_INSTALL_SKIP_STORAGE_KEY = "vibe-terminal.agent-auto-install-sk
 const SKILL_MANAGER_DEFAULT_DESCRIPTION = "설명이 등록되지 않은 스킬";
 const SKILL_MANAGER_REMOTE_QUERY_MIN = 2;
 const SKILL_MANAGER_SEARCH_DEBOUNCE_MS = 260;
+const EDITOR_QUERY_TIMEOUT_MS = 1500;
 const TERMINAL_FONT_OPTIONS = Object.freeze([
   Object.freeze({
     label: "D2Coding (기본)",
@@ -3117,22 +3118,27 @@ async function populateEditorMenu(view) {
     return;
   }
 
+  const fallbackList = getEditorMenuFallbackList();
+  cachedEditorList = fallbackList;
+  renderItems(fallbackList);
+
   if (!api?.app?.process?.queryEditors) {
-    cachedEditorList = getEditorMenuFallbackList();
-    renderItems(cachedEditorList);
     return;
   }
   try {
-    const result = await api.app.process.queryEditors();
+    const result = await Promise.race([
+      api.app.process.queryEditors(),
+      new Promise((resolve) => setTimeout(
+        () => resolve({ ok: false, error: "editor-query-timeout", editors: [] }),
+        EDITOR_QUERY_TIMEOUT_MS,
+      )),
+    ]);
     if (result?.ok && Array.isArray(result.editors) && result.editors.length > 0) {
       cachedEditorList = result.editors;
-    } else {
-      cachedEditorList = getEditorMenuFallbackList();
+      renderItems(cachedEditorList);
     }
-    renderItems(cachedEditorList);
   } catch (_error) {
-    cachedEditorList = getEditorMenuFallbackList();
-    renderItems(cachedEditorList);
+    // Keep fallback list already rendered.
   }
 }
 
@@ -3388,11 +3394,9 @@ function createPaneView(pane, index, preset, sessionMap) {
   openButton.addEventListener("click", async (event) => {
     event.stopPropagation();
 
-    // Toggle menu if clicking the chevron area, otherwise open directly
-    const rect = openButton.getBoundingClientRect();
-    const isChevronClick = event.clientX >= rect.right - 24;
-
-    if (isChevronClick) {
+    // Default click opens/closes the list for reliability.
+    const forceDirectOpen = Boolean(event.shiftKey || event.ctrlKey || event.metaKey);
+    if (!forceDirectOpen) {
       editorMenu.classList.toggle("is-open");
       return;
     }

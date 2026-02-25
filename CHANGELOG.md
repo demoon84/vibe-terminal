@@ -28,6 +28,11 @@
 - 변경 파일: `src/renderer/renderer.js`
 - 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "getEditorMenuFallbackList|populateEditorMenu" src/renderer/renderer.js`로 fallback 경로 반영 확인.
 
+### 6) 에디터 목록 즉시 렌더링 및 조회 타임아웃 방어
+- 요청 요약: 에디터 목록이 보이지 않는 문제를 줄이기 위해 IPC 응답 전에도 기본 목록을 즉시 렌더링하고, 조회 지연 시 fallback을 유지.
+- 변경 파일: `src/renderer/renderer.js`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "EDITOR_QUERY_TIMEOUT_MS|Promise.race|forceDirectOpen|populateEditorMenu" src/renderer/renderer.js`로 즉시 렌더링/타임아웃/클릭 동작 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
