@@ -425,6 +425,39 @@ function formatOpenInEditorError(errorCode) {
   return code || "unknown";
 }
 
+async function openEditorForView(view, options = {}) {
+  if (!view) {
+    return false;
+  }
+
+  const editorId = String(options.editorId || view.selectedEditorId || "").trim();
+  if (!editorId) {
+    setStatusLine("에디터 목록을 먼저 불러와주세요");
+    return false;
+  }
+
+  const cwd = view.cwd || process.cwd?.() || "";
+  if (!api?.app?.process?.openInEditor) {
+    setStatusLine("열기 기능을 사용할 수 없습니다");
+    return false;
+  }
+
+  const editorName = String(options.editorName || view.openButtonText?.textContent || "").trim();
+
+  try {
+    const result = await api.app.process.openInEditor({ editorId, cwd });
+    if (result?.ok) {
+      setStatusLine(`${editorName || "에디터"}에서 열기 완료`);
+      return true;
+    }
+    setStatusLine(`열기 실패: ${formatOpenInEditorError(result?.error)}`);
+    return false;
+  } catch (error) {
+    setStatusLine(`열기 실패: ${String(error)}`);
+    return false;
+  }
+}
+
 function renderSkillManagerList(listElement, skills = [], emptyMessage = "") {
   clearSkillManagerList(listElement);
   if (!Array.isArray(skills) || skills.length === 0) {
@@ -3133,7 +3166,7 @@ async function populateEditorMenu(view) {
       itemBtn.appendChild(iconSpan);
       itemBtn.appendChild(labelSpan);
 
-      itemBtn.addEventListener("click", (e) => {
+      itemBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         view.selectedEditorId = editor.id;
         view.openButtonText.textContent = editor.name;
@@ -3143,6 +3176,10 @@ async function populateEditorMenu(view) {
           view.openButtonIcon.innerHTML = EDITOR_ICONS[editor.id] || EDITOR_ICONS.fallback;
         }
         view.editorMenu.classList.remove("is-open");
+        await openEditorForView(view, {
+          editorId: editor.id,
+          editorName: editor.name,
+        });
       });
 
       view.editorMenu.appendChild(itemBtn);
@@ -3444,26 +3481,7 @@ function createPaneView(pane, index, preset, sessionMap) {
 
     editorMenu.classList.remove("is-open");
 
-    const editorId = view.selectedEditorId;
-    if (!editorId) {
-      setStatusLine("에디터 목록을 먼저 불러와주세요");
-      return;
-    }
-    const cwd = view.cwd || process.cwd?.() || "";
-    if (!api?.app?.process?.openInEditor) {
-      setStatusLine("열기 기능을 사용할 수 없습니다");
-      return;
-    }
-    try {
-      const result = await api.app.process.openInEditor({ editorId, cwd });
-      if (result?.ok) {
-        setStatusLine(`${view.openButtonText.textContent}에서 열기 완료`);
-      } else {
-        setStatusLine(`열기 실패: ${formatOpenInEditorError(result?.error)}`);
-      }
-    } catch (error) {
-      setStatusLine(`열기 실패: ${String(error)}`);
-    }
+    await openEditorForView(view);
   });
 
   // Close menu when clicking outside

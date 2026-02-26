@@ -43,6 +43,11 @@
 - 변경 파일: `src/renderer/renderer.js`
 - 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "mergeEditorMenuItems|getEditorMenuFallbackList|populateEditorMenu" src/renderer/renderer.js`로 병합 로직 반영 확인.
 
+### 9) 에디터 목록 항목 클릭 시 즉시 열기 동작 추가
+- 요청 요약: 에디터 드롭다운에서 항목을 클릭하면 선택과 동시에 해당 에디터로 경로를 바로 열도록 수정.
+- 변경 파일: `src/renderer/renderer.js`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "openEditorForView|itemBtn.addEventListener\\(\"click\", async|await openEditorForView\\(view\\)" src/renderer/renderer.js`로 즉시 열기 경로 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
