@@ -48,6 +48,11 @@
 - 변경 파일: `src/renderer/renderer.js`
 - 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "openEditorForView|itemBtn.addEventListener\\(\"click\", async|await openEditorForView\\(view\\)" src/renderer/renderer.js`로 즉시 열기 경로 반영 확인.
 
+### 10) 에디터 항목 클릭 동작을 선택/실행 분리로 조정
+- 요청 요약: 드롭다운 항목 선택 시에는 열지 않고, 이미 선택된 항목을 다시 클릭한 경우에만 에디터를 실행하도록 동작 수정.
+- 변경 파일: `src/renderer/renderer.js`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "isAlreadySelected|itemBtn.addEventListener\\(\"click\", async|openEditorForView" src/renderer/renderer.js`로 조건 실행 경로 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.

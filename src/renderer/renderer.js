@@ -3168,6 +3168,7 @@ async function populateEditorMenu(view) {
 
       itemBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
+        const isAlreadySelected = view.selectedEditorId === editor.id;
         view.selectedEditorId = editor.id;
         view.openButtonText.textContent = editor.name;
         if (editor.icon) {
@@ -3176,10 +3177,12 @@ async function populateEditorMenu(view) {
           view.openButtonIcon.innerHTML = EDITOR_ICONS[editor.id] || EDITOR_ICONS.fallback;
         }
         view.editorMenu.classList.remove("is-open");
-        await openEditorForView(view, {
-          editorId: editor.id,
-          editorName: editor.name,
-        });
+        if (isAlreadySelected) {
+          await openEditorForView(view, {
+            editorId: editor.id,
+            editorName: editor.name,
+          });
+        }
       });
 
       view.editorMenu.appendChild(itemBtn);
