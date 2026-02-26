@@ -2,6 +2,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
+const { TextDecoder } = require("util");
 const { pathToFileURL } = require("url");
 const { spawn, spawnSync } = require("child_process");
 const { app, BrowserWindow, dialog, ipcMain, Menu, clipboard, shell } = require("electron");
@@ -115,6 +116,7 @@ const SKILLS_SH_API_BASE = String(process.env.SKILLS_API_URL || "https://skills.
 const SKILLS_SH_SEARCH_LIMIT = 18;
 const SKILLS_SH_QUERY_MIN_LENGTH = 2;
 const SKILLS_SH_FETCH_TIMEOUT_MS = 8_000;
+const SKILLS_CLI_MAX_BUFFER = 32 * 1024 * 1024;
 const CURATED_ICON_TREE_CACHE_TTL_MS = 10 * 60 * 1000;
 const CURATED_ICON_TREE_TIMEOUT_MS = 8_000;
 const DEFAULT_SKILL_DESCRIPTION = "openai/skills에서 설치 가능한 스킬";
@@ -564,12 +566,30 @@ function getSkillInstallPaths(skillName) {
   };
 }
 
-function hasSkillManifest(skillPath) {
+function resolveSkillManifestPath(skillPath) {
   const normalizedPath = String(skillPath || "").trim();
   if (!normalizedPath) {
-    return false;
+    return "";
   }
-  return fs.existsSync(path.join(normalizedPath, "SKILL.md"));
+
+  const candidates = [
+    path.join(normalizedPath, "SKILL.md"),
+    path.join(normalizedPath, "AGENTS.md"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch (_error) {
+      // Ignore invalid path checks.
+    }
+  }
+  return "";
+}
+
+function hasSkillManifest(skillPath) {
+  return Boolean(resolveSkillManifestPath(skillPath));
 }
 
 function resolveInstalledSkillPath(skillName) {
@@ -613,10 +633,14 @@ function cleanupStaleSkillInstallPaths(skillName) {
 
 function toSafeSkillName(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+  if (!normalized) {
     return "";
   }
-  return normalized;
+  const collapsed = normalized
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return collapsed;
 }
 
 function toSafeRepositorySlug(value) {
@@ -922,8 +946,8 @@ function listSkillDirs(baseDir, options = {}) {
     }
 
     const skillDir = path.join(baseDir, name);
-    const skillFilePath = path.join(skillDir, "SKILL.md");
-    if (!fs.existsSync(skillFilePath)) {
+    const skillFilePath = resolveSkillManifestPath(skillDir);
+    if (!skillFilePath) {
       continue;
     }
 
@@ -1020,14 +1044,17 @@ function parseSkillsShIdentifier(value) {
     return {
       repo: "",
       skillId: "",
+      rawSkillId: "",
     };
   }
 
   const repo = toSafeRepositorySlug(`${parts[0]}/${parts[1]}`);
-  const skillId = toSafeSkillName(parts.slice(2).join("-"));
+  const rawSkillId = parts.slice(2).join("/");
+  const skillId = toSafeSkillName(rawSkillId);
   return {
     repo,
     skillId,
+    rawSkillId,
   };
 }
 
@@ -1076,12 +1103,13 @@ function parseSkillsShSearchResult(payload) {
     const parsedId = parseSkillsShIdentifier(skill?.id);
     const slug = normalizeSkillsShSlug(skill?.id);
     const repository = toSafeRepositorySlug(skill?.source) || parsedId.repo;
-    const skillName = toSafeSkillName(skill?.skillId || parsedId.skillId || skill?.name);
-    if (!repository || !skillName) {
+    const installSkillId = String(skill?.skillId || parsedId.rawSkillId || "").trim();
+    const skillName = toSafeSkillName(installSkillId || parsedId.skillId || skill?.name);
+    if (!repository || !skillName || !installSkillId) {
       continue;
     }
 
-    const displayName = String(skill?.name || skillName).trim()
+    const displayName = String(skill?.name || installSkillId || skillName).trim()
       || formatSkillDisplayName(skillName)
       || skillName;
     const installs = Number.parseInt(String(skill?.installs || "0"), 10);
@@ -1093,6 +1121,7 @@ function parseSkillsShSearchResult(payload) {
       description: `${repository} · skills.sh 검색 결과`,
       installProvider: "skills-sh",
       installRepo: repository,
+      installSkillId,
       installs: Number.isFinite(installs) && installs > 0 ? installs : 0,
       iconUrl: iconUrl || fallbackIconUrl,
       iconFallbackUrl: fallbackIconUrl,
@@ -1378,6 +1407,118 @@ function getWindowsProgramsDir() {
   return path.join(os.homedir(), "AppData", "Local", "Programs");
 }
 
+function collectWindowsIntelliJFallbackExecutables({ programsDir, programFiles, programFilesX86 }) {
+  const results = [];
+  const seen = new Set();
+  const addExecutableIfExists = (candidatePath) => {
+    const normalized = String(candidatePath || "").trim();
+    if (!normalized) {
+      return;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+    try {
+      if (!fs.existsSync(normalized)) {
+        return;
+      }
+      const stat = fs.statSync(normalized);
+      if (!stat.isFile()) {
+        return;
+      }
+      seen.add(key);
+      results.push(normalized);
+    } catch (_error) {
+      // Ignore invalid candidate paths.
+    }
+  };
+
+  addExecutableIfExists(path.join(programsDir, "IntelliJ IDEA", "bin", "idea64.exe"));
+  addExecutableIfExists(path.join(programsDir, "IntelliJ IDEA Community Edition", "bin", "idea64.exe"));
+  addExecutableIfExists(path.join(programFiles, "JetBrains", "IntelliJ IDEA", "bin", "idea64.exe"));
+  addExecutableIfExists(path.join(programFiles, "JetBrains", "IntelliJ IDEA Community Edition", "bin", "idea64.exe"));
+  addExecutableIfExists(path.join(programFilesX86, "JetBrains", "IntelliJ IDEA", "bin", "idea64.exe"));
+  addExecutableIfExists(path.join(programFilesX86, "JetBrains", "IntelliJ IDEA Community Edition", "bin", "idea64.exe"));
+
+  const scanVersionedInstallDir = (baseDir) => {
+    const rootDir = String(baseDir || "").trim();
+    if (!rootDir || !fs.existsSync(rootDir)) {
+      return;
+    }
+    let entries = [];
+    try {
+      entries = fs.readdirSync(rootDir, { withFileTypes: true });
+    } catch (_error) {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const folderName = String(entry.name || "").trim();
+      if (!folderName || !folderName.toLowerCase().startsWith("intellij idea")) {
+        continue;
+      }
+      addExecutableIfExists(path.join(rootDir, folderName, "bin", "idea64.exe"));
+    }
+  };
+
+  scanVersionedInstallDir(programsDir);
+  scanVersionedInstallDir(path.join(programFiles, "JetBrains"));
+  scanVersionedInstallDir(path.join(programFilesX86, "JetBrains"));
+
+  const localAppData =
+    String(process.env.LOCALAPPDATA || "").trim()
+    || path.join(os.homedir(), "AppData", "Local");
+  const toolboxAppsDir = path.join(localAppData, "JetBrains", "Toolbox", "apps");
+  if (fs.existsSync(toolboxAppsDir)) {
+    let productEntries = [];
+    try {
+      productEntries = fs.readdirSync(toolboxAppsDir, { withFileTypes: true });
+    } catch (_error) {
+      productEntries = [];
+    }
+    for (const product of productEntries) {
+      if (!product.isDirectory()) {
+        continue;
+      }
+      const productName = String(product.name || "").trim();
+      if (!productName || !productName.toUpperCase().startsWith("IDEA")) {
+        continue;
+      }
+      const productDir = path.join(toolboxAppsDir, productName);
+      let channelEntries = [];
+      try {
+        channelEntries = fs.readdirSync(productDir, { withFileTypes: true });
+      } catch (_error) {
+        channelEntries = [];
+      }
+      for (const channel of channelEntries) {
+        if (!channel.isDirectory()) {
+          continue;
+        }
+        const channelDir = path.join(productDir, channel.name);
+        addExecutableIfExists(path.join(channelDir, "bin", "idea64.exe"));
+        let buildEntries = [];
+        try {
+          buildEntries = fs.readdirSync(channelDir, { withFileTypes: true });
+        } catch (_error) {
+          buildEntries = [];
+        }
+        for (const buildEntry of buildEntries) {
+          if (!buildEntry.isDirectory()) {
+            continue;
+          }
+          addExecutableIfExists(path.join(channelDir, buildEntry.name, "bin", "idea64.exe"));
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
 function buildKnownEditors() {
   if (process.platform === "win32") {
     const programsDir = getWindowsProgramsDir();
@@ -1388,12 +1529,11 @@ function buildKnownEditors() {
         id: "idea",
         name: "IntelliJ IDEA",
         command: ["idea64.exe"],
-        fallbackExecutables: [
-          path.join(programsDir, "IntelliJ IDEA", "bin", "idea64.exe"),
-          path.join(programFiles, "JetBrains", "IntelliJ IDEA", "bin", "idea64.exe"),
-          path.join(programFiles, "JetBrains", "IntelliJ IDEA Community Edition", "bin", "idea64.exe"),
-          path.join(programFilesX86, "JetBrains", "IntelliJ IDEA", "bin", "idea64.exe"),
-        ],
+        fallbackExecutables: collectWindowsIntelliJFallbackExecutables({
+          programsDir,
+          programFiles,
+          programFilesX86,
+        }),
       },
       {
         id: "cursor",
@@ -1401,6 +1541,8 @@ function buildKnownEditors() {
         command: ["cursor"],
         fallbackExecutables: [
           path.join(programsDir, "cursor", "Cursor.exe"),
+          path.join(programFiles, "Cursor", "Cursor.exe"),
+          path.join(programFilesX86, "Cursor", "Cursor.exe"),
         ],
       },
       {
@@ -1410,6 +1552,8 @@ function buildKnownEditors() {
         fallbackExecutables: [
           path.join(programsDir, "Microsoft VS Code", "Code.exe"),
           path.join(programsDir, "VS Code", "Code.exe"),
+          path.join(programFiles, "Microsoft VS Code", "Code.exe"),
+          path.join(programFilesX86, "Microsoft VS Code", "Code.exe"),
         ],
       },
       {
@@ -1418,6 +1562,8 @@ function buildKnownEditors() {
         command: ["windsurf"],
         fallbackExecutables: [
           path.join(programsDir, "Windsurf", "Windsurf.exe"),
+          path.join(programFiles, "Windsurf", "Windsurf.exe"),
+          path.join(programFilesX86, "Windsurf", "Windsurf.exe"),
         ],
       },
       {
@@ -1450,6 +1596,28 @@ function buildKnownEditors() {
 const KNOWN_EDITORS = buildKnownEditors();
 
 let cachedInstalledEditors = null;
+
+async function getFileIconBase64(targetPath, options = {}) {
+  const filePath = String(targetPath || "").trim();
+  if (!filePath || !path.isAbsolute(filePath) || !fs.existsSync(filePath)) {
+    return null;
+  }
+
+  const size = options?.size === "large" ? "large" : "small";
+  try {
+    const nativeImage = await app.getFileIcon(filePath, { size });
+    if (!nativeImage || nativeImage.isEmpty()) {
+      return null;
+    }
+    const pngBuffer = nativeImage.toPNG();
+    if (!Buffer.isBuffer(pngBuffer) || pngBuffer.length === 0) {
+      return null;
+    }
+    return `data:image/png;base64,${pngBuffer.toString("base64")}`;
+  } catch (_error) {
+    return null;
+  }
+}
 
 async function getMacAppIconBase64(appPath) {
   try {
@@ -1540,6 +1708,137 @@ function resolveEditorLaunchCommand(editor) {
   return null;
 }
 
+function runSkillsCliSync(commandArgs = []) {
+  const args = Array.isArray(commandArgs)
+    ? commandArgs.map((arg) => String(arg ?? "").trim()).filter((arg) => arg.length > 0)
+    : [];
+  if (args.length === 0) {
+    return {
+      ok: false,
+      error: "skills-cli-invalid-args",
+      result: null,
+      method: "",
+    };
+  }
+
+  const options = {
+    encoding: process.platform === "win32" ? "buffer" : "utf8",
+    windowsHide: true,
+    env: withAugmentedPath(process.env),
+    cwd: app.getPath("home"),
+    maxBuffer: SKILLS_CLI_MAX_BUFFER,
+  };
+
+  const countReplacementChars = (value) =>
+    (String(value || "").match(/\uFFFD/g) || []).length;
+
+  const decodeOutput = (value) => {
+    if (Buffer.isBuffer(value)) {
+      const utf8Text = value.toString("utf8");
+      if (process.platform !== "win32" || !utf8Text.includes("\uFFFD")) {
+        return utf8Text;
+      }
+      try {
+        const eucKrText = new TextDecoder("euc-kr").decode(value);
+        if (countReplacementChars(eucKrText) < countReplacementChars(utf8Text)) {
+          return eucKrText;
+        }
+      } catch (_error) {
+        // Best effort fallback to UTF-8.
+      }
+      return utf8Text;
+    }
+    return String(value || "");
+  };
+
+  const normalizeResultOutput = (result) => {
+    if (!result) {
+      return result;
+    }
+    result.stdout = decodeOutput(result.stdout);
+    result.stderr = decodeOutput(result.stderr);
+    return result;
+  };
+
+  const attempts = [];
+
+  if (process.platform === "win32") {
+    const comSpec = String(process.env.ComSpec || "cmd.exe").trim() || "cmd.exe";
+    const quoteCmdArg = (value) => {
+      const text = String(value ?? "").trim();
+      if (!text) {
+        return "\"\"";
+      }
+      if (!/[\s"&|<>^()%!]/.test(text)) {
+        return text;
+      }
+      return `"${text.replace(/"/g, "\"\"").replace(/%/g, "%%")}"`;
+    };
+    const toCmdCommandText = (parts) => {
+      const commandName = String(parts[0] || "").trim() || "cmd";
+      const tail = parts.slice(1).map((part) => quoteCmdArg(part)).join(" ");
+      return tail ? `${commandName} ${tail}` : commandName;
+    };
+    const npxCmdText = `chcp 65001>nul && ${toCmdCommandText(["npx", "-y", "skills", ...args])}`;
+    const npmCmdText = `chcp 65001>nul && ${
+      toCmdCommandText(["npm", "exec", "--yes", "--package=skills", "--", "skills", ...args])
+    }`;
+
+    attempts.push({
+      method: "cmd-npx",
+      run: () => spawnSync(comSpec, ["/d", "/s", "/c", npxCmdText], options),
+    });
+    attempts.push({
+      method: "cmd-npm-exec",
+      run: () => spawnSync(comSpec, ["/d", "/s", "/c", npmCmdText], options),
+    });
+  } else {
+    const npxCommand = resolveNpxCommand();
+    if (npxCommand) {
+      attempts.push({
+        method: "npx",
+        run: () => spawnSync(npxCommand, ["-y", "skills", ...args], options),
+      });
+    }
+
+    const npmCommand = resolveNpmCommand();
+    if (npmCommand) {
+      attempts.push({
+        method: "npm-exec",
+        run: () => spawnSync(
+          npmCommand,
+          ["exec", "--yes", "--package=skills", "--", "skills", ...args],
+          options,
+        ),
+      });
+    }
+  }
+
+  if (attempts.length === 0) {
+    return {
+      ok: false,
+      error: "skills-cli-not-found",
+      result: null,
+      method: "",
+    };
+  }
+
+  let last = null;
+  for (const attempt of attempts) {
+    const result = normalizeResultOutput(attempt.run());
+    last = {
+      ok: true,
+      method: attempt.method,
+      result,
+    };
+    if (result && !result.error && result.status === 0) {
+      return last;
+    }
+  }
+
+  return last;
+}
+
 function toShortError(error) {
   if (!error) {
     return "";
@@ -1610,7 +1909,27 @@ async function queryInstalledEditors() {
   if (process.platform !== "darwin") {
     const installed = [];
     for (const editor of KNOWN_EDITORS) {
-      if (editor.alwaysVisible || resolveEditorLaunchCommand(editor)) {
+      if (editor.alwaysVisible) {
+        installed.push({ id: editor.id, name: editor.name });
+        continue;
+      }
+
+      const launch = resolveEditorLaunchCommand(editor);
+      if (!launch) {
+        continue;
+      }
+
+      let icon = null;
+      if (process.platform === "win32") {
+        const launchCommand = String(launch.command || "").trim();
+        if (launchCommand && path.isAbsolute(launchCommand) && fs.existsSync(launchCommand)) {
+          icon = await getFileIconBase64(launchCommand, { size: "small" });
+        }
+      }
+
+      if (icon) {
+        installed.push({ id: editor.id, name: editor.name, icon });
+      } else {
         installed.push({ id: editor.id, name: editor.name });
       }
     }
@@ -2668,6 +2987,7 @@ async function getSkillCatalog(options = {}) {
   const skillsShRowsToRender = skillsSh.skipped
     ? SKILLS_SH_TOP_ALL_TIME.map(s => ({
       ...s,
+      installSkillId: s.name,
       installRepo: s.repo,
       iconUrl: buildSkillsShOpenGraphImageUrl(`${s.repo}/${s.name}`),
       iconFallbackUrl: getSkillsShOwnerAvatarUrl(s.repo)
@@ -2700,6 +3020,7 @@ async function getSkillCatalog(options = {}) {
       source: "skills-sh",
       installProvider: "skills-sh",
       installRepo,
+      installSkillId: String(row?.installSkillId || name),
       installs: Number.isFinite(row?.installs) ? Math.max(0, row.installs) : 0,
       iconUrl: String(row?.iconUrl || getSkillsShOwnerAvatarUrl(installRepo)),
       iconFallbackUrl: String(row?.iconFallbackUrl || getSkillsShOwnerAvatarUrl(installRepo)),
@@ -2823,9 +3144,10 @@ function installCuratedSkill(skillName) {
   };
 }
 
-function installSkillsShSkill(skillName, installRepo) {
+function installSkillsShSkill(skillName, installRepo, installSkillId = "") {
   const normalized = toSafeSkillName(skillName);
   const repository = toSafeRepositorySlug(installRepo);
+  const targetSkillId = String(installSkillId || "").trim() || normalized;
   if (!normalized) {
     return {
       ok: false,
@@ -2850,8 +3172,19 @@ function installSkillsShSkill(skillName, installRepo) {
   }
   cleanupStaleSkillInstallPaths(normalized);
 
-  const npxCommand = resolveNpxCommand();
-  if (!npxCommand) {
+  const cliRun = runSkillsCliSync([
+    "add",
+    repository,
+    "--skill",
+    targetSkillId,
+    "--agent",
+    "codex",
+    "--global",
+    "--yes",
+    "--copy",
+    "--full-depth",
+  ]);
+  if (!cliRun.ok || !cliRun.result) {
     return {
       ok: false,
       error: "skills-cli-not-found",
@@ -2859,29 +3192,21 @@ function installSkillsShSkill(skillName, installRepo) {
     };
   }
 
-  const result = spawnSync(
-    npxCommand,
-    [
-      "-y",
-      "skills",
-      "add",
-      repository,
-      "--skill",
-      normalized,
-      "--agent",
-      "codex",
-      "--global",
-      "--yes",
-    ],
-    {
-      encoding: "utf8",
-      windowsHide: true,
-      env: withAugmentedPath(process.env),
-      cwd: app.getPath("home"),
-    },
-  );
+  const result = cliRun.result;
   const stdout = trimTail(String(result.stdout || ""));
   const stderr = trimTail(String(result.stderr || ""));
+
+  const nextInstalledPath = resolveInstalledSkillPath(normalized);
+  if (nextInstalledPath) {
+    return {
+      ok: true,
+      skillName: normalized,
+      action: "installed",
+      stdout,
+      stderr,
+    };
+  }
+
   if (result.error) {
     return {
       ok: false,
@@ -2900,22 +3225,10 @@ function installSkillsShSkill(skillName, installRepo) {
       stderr,
     };
   }
-
-  const nextInstalledPath = resolveInstalledSkillPath(normalized);
-  if (!nextInstalledPath) {
-    return {
-      ok: false,
-      error: "skills-install-finished-but-missing",
-      skillName: normalized,
-      stdout,
-      stderr,
-    };
-  }
-
   return {
-    ok: true,
+    ok: false,
+    error: "skills-install-finished-but-missing",
     skillName: normalized,
-    action: "installed",
     stdout,
     stderr,
   };
@@ -2925,6 +3238,7 @@ function installSkill(payload = {}) {
   const normalized = toSafeSkillName(payload.skillName);
   const installProvider = normalizeSkillInstallProvider(payload.installProvider);
   const installRepo = toSafeRepositorySlug(payload.installRepo);
+  const installSkillId = String(payload.installSkillId || "").trim();
   if (!normalized) {
     return {
       ok: false,
@@ -2933,7 +3247,7 @@ function installSkill(payload = {}) {
   }
 
   if (installProvider === "skills-sh") {
-    return installSkillsShSkill(normalized, installRepo);
+    return installSkillsShSkill(normalized, installRepo, installSkillId);
   }
 
   return installCuratedSkill(normalized);
@@ -3858,6 +4172,10 @@ app.whenReady().then(() => {
     return path.join(app.getPath("userData"), "AGENTS.md");
   }
 
+  function shouldUseDirectSourceAgentsPolicy() {
+    return !app.isPackaged;
+  }
+
   function resolveAgentsPolicySourcePath() {
     const candidates = [];
 
@@ -3945,6 +4263,13 @@ app.whenReady().then(() => {
   }
 
   function prepareAgentsPolicyPath() {
+    if (shouldUseDirectSourceAgentsPolicy()) {
+      const sourcePath = resolveAgentsPolicySourcePath();
+      if (sourcePath) {
+        return sourcePath;
+      }
+    }
+
     const userDataPolicyPath = resolveAgentsPolicyPath();
     const userDataDir = path.dirname(userDataPolicyPath);
 
@@ -4059,13 +4384,15 @@ app.whenReady().then(() => {
         };
       }
       fs.writeFileSync(userDataPolicyPath, validated.value.content, "utf-8");
-      const sourceHash = computeTextHash(readAgentsPolicySourceContent());
-      const userHash = computeTextHash(validated.value.content);
-      writeAgentsPolicySyncMeta(resolveAgentsPolicySyncMetaPath(userDataPolicyPath), {
-        sourceHash,
-        userHash,
-        autoSyncEligible: userHash === sourceHash,
-      });
+      if (app.isPackaged) {
+        const sourceHash = computeTextHash(readAgentsPolicySourceContent());
+        const userHash = computeTextHash(validated.value.content);
+        writeAgentsPolicySyncMeta(resolveAgentsPolicySyncMetaPath(userDataPolicyPath), {
+          sourceHash,
+          userHash,
+          autoSyncEligible: userHash === sourceHash,
+        });
+      }
       return {
         ok: true,
         path: userDataPolicyPath,
@@ -4101,7 +4428,7 @@ app.whenReady().then(() => {
 
         return { ok: false, error: defaultOpenError };
       }
-      return { ok: false, error: "AGENTS.md not found in user data directory." };
+      return { ok: false, error: "AGENTS.md not found." };
     } catch (error) {
       return { ok: false, error: String(error) };
     }

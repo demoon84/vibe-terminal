@@ -13,6 +13,7 @@ const SESSION_STATUS = Object.freeze({
 });
 
 const PRESET_IDS = Object.freeze({
+  ONE_BY_ONE: "1x1",
   ONE_BY_TWO: "1x2",
   ONE_BY_FOUR: "1x4",
   TWO_BY_SIX: "2x6",
@@ -21,6 +22,13 @@ const PRESET_IDS = Object.freeze({
 });
 
 const PRESET_DEFINITIONS = Object.freeze({
+  [PRESET_IDS.ONE_BY_ONE]: Object.freeze({
+    id: PRESET_IDS.ONE_BY_ONE,
+    name: "1x1 (1)",
+    rows: 1,
+    columns: 1,
+    panelCount: 1,
+  }),
   [PRESET_IDS.ONE_BY_TWO]: Object.freeze({
     id: PRESET_IDS.ONE_BY_TWO,
     name: "1x2 (2)",

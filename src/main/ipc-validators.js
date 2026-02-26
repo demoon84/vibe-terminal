@@ -314,12 +314,21 @@ function validateSkillInstallPayload(payload) {
     return { ok: false, error: "invalid-payload:installRepo-required" };
   }
 
+  const installSkillId = asTrimmedString(payload.installSkillId);
+  if (installSkillId.length > 160) {
+    return { ok: false, error: "invalid-payload:installSkillId-too-long" };
+  }
+  if (installSkillId && !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(installSkillId)) {
+    return { ok: false, error: "invalid-payload:installSkillId-format" };
+  }
+
   return {
     ok: true,
     value: {
       skillName,
       installProvider,
       installRepo,
+      installSkillId,
     },
   };
 }

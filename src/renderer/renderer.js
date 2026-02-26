@@ -1,4 +1,5 @@
 const DEFAULT_PRESET_LAYOUTS = Object.freeze({
+  "1x1": { id: "1x1", columns: 1, rows: 1, panelCount: 1 },
   "1x2": { id: "1x2", columns: 2, rows: 1, panelCount: 2 },
   "1x4": { id: "1x4", columns: 2, rows: 2, panelCount: 4 },
   "2x6": { id: "2x6", columns: 3, rows: 2, panelCount: 6 },
@@ -26,7 +27,8 @@ const AGENT_AUTO_INSTALL_SKIP_STORAGE_KEY = "vibe-terminal.agent-auto-install-sk
 const SKILL_MANAGER_DEFAULT_DESCRIPTION = "설명이 등록되지 않은 스킬";
 const SKILL_MANAGER_REMOTE_QUERY_MIN = 2;
 const SKILL_MANAGER_SEARCH_DEBOUNCE_MS = 260;
-const EDITOR_QUERY_TIMEOUT_MS = 1500;
+const USER_QUESTION_BUFFER_MAX_CHARS = 600;
+const USER_QUESTION_TEXT_MAX_CHARS = 220;
 const TERMINAL_FONT_OPTIONS = Object.freeze([
   Object.freeze({
     label: "D2Coding (기본)",
@@ -138,6 +140,7 @@ const state = {
   agentsPolicyPath: "",
   agentsPolicyInitialContent: "",
   agentsPolicyLoadedMtimeMs: null,
+  pendingQuestionInputBySessionId: new Map(),
   terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
 };
@@ -149,6 +152,102 @@ function setStatusLine(message) {
   const timestamp = new Date().toLocaleTimeString();
   const detail = typeof message === "string" && message.length > 0 ? ` | ${message}` : "";
   ui.statusLine.textContent = `${timestamp}${detail}`;
+}
+
+function normalizeQuestionInlineText(value) {
+  const collapsed = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!collapsed) {
+    return "";
+  }
+  if (collapsed.length <= USER_QUESTION_TEXT_MAX_CHARS) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, USER_QUESTION_TEXT_MAX_CHARS - 3)}...`;
+}
+
+function sanitizeQuestionInlineText(value) {
+  return String(value || "")
+    .replace(/\u001b/g, "")
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .trim();
+}
+
+function buildQuestionInlineLine(rawText) {
+  const normalized = normalizeQuestionInlineText(rawText);
+  if (!normalized) {
+    return "";
+  }
+  const safe = sanitizeQuestionInlineText(normalized);
+  if (!safe) {
+    return "";
+  }
+  return `\r\n\u001b[48;2;66;78;103m\u001b[38;2;240;244;255m ? ${safe} \u001b[0m\r\n`;
+}
+
+function echoUserQuestionInTerminal(sessionId, rawText) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+  const line = buildQuestionInlineLine(rawText);
+  if (!line) {
+    return;
+  }
+  appendOutput(normalizedSessionId, line);
+}
+
+function captureUserQuestionInput(sessionId, data) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  const chunk = typeof data === "string" ? data : "";
+  if (!normalizedSessionId || !chunk) {
+    return;
+  }
+
+  let draft = String(state.pendingQuestionInputBySessionId.get(normalizedSessionId) || "");
+  let inEscapeSequence = false;
+  for (const char of chunk) {
+    const code = char.charCodeAt(0);
+    if (inEscapeSequence) {
+      if (code >= 0x40 && code <= 0x7e) {
+        inEscapeSequence = false;
+      }
+      continue;
+    }
+
+    if (char === "\u001b") {
+      inEscapeSequence = true;
+      continue;
+    }
+    if (char === "\r" || char === "\n") {
+      echoUserQuestionInTerminal(normalizedSessionId, draft);
+      draft = "";
+      continue;
+    }
+    if (char === "\u0003" || char === "\u0015") {
+      draft = "";
+      continue;
+    }
+    if (char === "\u007f" || char === "\b") {
+      draft = draft.slice(0, -1);
+      continue;
+    }
+    if (code < 0x20) {
+      continue;
+    }
+
+    draft += char;
+    if (draft.length > USER_QUESTION_BUFFER_MAX_CHARS) {
+      draft = draft.slice(draft.length - USER_QUESTION_BUFFER_MAX_CHARS);
+    }
+  }
+
+  if (draft) {
+    state.pendingQuestionInputBySessionId.set(normalizedSessionId, draft);
+  } else {
+    state.pendingQuestionInputBySessionId.delete(normalizedSessionId);
+  }
 }
 
 function setTerminalFontOverlayVisible(visible) {
@@ -188,10 +287,14 @@ function isAgentsPolicyOverlayVisible() {
 
 function normalizeSkillName(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(normalized)) {
+  if (!normalized) {
     return "";
   }
-  return normalized;
+  const collapsed = normalized
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return collapsed;
 }
 
 function setSkillManagerControlsDisabled(disabled) {
@@ -217,6 +320,7 @@ function normalizeSkillCatalogRows(rows) {
     }
     const installProvider = String(row?.installProvider || "").trim().toLowerCase();
     const installRepo = String(row?.installRepo || "").trim();
+    const installSkillId = String(row?.installSkillId || "").trim();
     const installs = Number.parseInt(String(row?.installs || "0"), 10);
     const iconUrl = String(row?.iconUrl || "").trim();
     const iconFallbackUrl = String(row?.iconFallbackUrl || "").trim();
@@ -230,6 +334,7 @@ function normalizeSkillCatalogRows(rows) {
       source: String(row?.source || ""),
       installProvider,
       installRepo,
+      installSkillId,
       installs: Number.isFinite(installs) && installs > 0 ? installs : 0,
       iconUrl,
       iconFallbackUrl,
@@ -294,7 +399,8 @@ function getSkillActionKey(skill) {
   const name = normalizeSkillName(skill?.name);
   const provider = String(skill?.installProvider || "").trim().toLowerCase();
   const repo = String(skill?.installRepo || "").trim().toLowerCase();
-  return `${name}|${provider}|${repo}`;
+  const skillId = String(skill?.installSkillId || "").trim().toLowerCase();
+  return `${name}|${provider}|${repo}|${skillId}`;
 }
 
 function getSkillSourceTag(skill) {
@@ -395,6 +501,9 @@ function formatSkillActionError(errorCode) {
   }
   if (code === "invalid-install-repo" || code === "invalid-payload:installRepo-format") {
     return "스킬 저장소 형식이 올바르지 않습니다";
+  }
+  if (code === "invalid-payload:installSkillId-format" || code === "invalid-payload:installSkillId-too-long") {
+    return "스킬 ID 형식이 올바르지 않습니다";
   }
   if (code === "invalid-payload:installRepo-required") {
     return "skills.sh 설치에는 저장소 정보가 필요합니다";
@@ -664,9 +773,20 @@ async function runSkillManagerAction(skill, action) {
       if (skill.installRepo) {
         payload.installRepo = skill.installRepo;
       }
+      if (skill.installSkillId) {
+        payload.installSkillId = String(skill.installSkillId);
+      }
       const result = await api.app.process.installSkill(payload);
       if (!result || result.ok !== true) {
-        setStatusLine(`스킬 설치 실패: ${formatSkillActionError(result?.error)}`);
+        const detailText = String(result?.stderr || result?.stdout || "").trim();
+        const detailLine = detailText
+          ? detailText.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0).slice(-1)[0]
+          : "";
+        if (detailLine) {
+          setStatusLine(`스킬 설치 실패: ${formatSkillActionError(result?.error)} (${detailLine})`);
+        } else {
+          setStatusLine(`스킬 설치 실패: ${formatSkillActionError(result?.error)}`);
+        }
       } else {
         setStatusLine(`스킬 설치 완료: ${skill.displayName}`);
       }
@@ -1415,6 +1535,7 @@ function getVisiblePanes(layout) {
 }
 
 const GRID_PRESET_CLASS_NAMES = Object.freeze([
+  "preset-1x1",
   "preset-1x2",
   "preset-1x4",
   "preset-2x6",
@@ -1551,6 +1672,9 @@ function restorePaneSnapshot(view) {
 function clearPaneViews() {
   for (const view of state.paneViews.values()) {
     rememberPaneSnapshot(view);
+    if (view?.sessionId) {
+      state.pendingQuestionInputBySessionId.delete(view.sessionId);
+    }
     if (view.resizeObserver) {
       view.resizeObserver.disconnect();
     }
@@ -3079,12 +3203,12 @@ const EDITOR_ICONS = {
   vscode: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11 2L4 7L11 12V2Z" fill="#0066b8"/><path d="M4 7l7 5-2.5 3L2 11l2-4z" fill="#007acc"/><path d="M11 2L4 7 2 5l6.5-4L11 2z" fill="#1f9ae0"/><path d="M11 2v10l3-2.5V4.5L11 2z" fill="#24292e"/></svg>',
   cursor: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1e1e1e"/><path d="M11 11L6 11V6" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 11L5 5" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>',
   windsurf: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#0f172a"/><path d="M2 10c1.8-2.6 3.3-3.9 4.7-3.9 1.3 0 2 .9 2.6 1.7.7.9 1.2 1.5 2.1 1.5.8 0 1.6-.5 2.6-1.7" stroke="#67e8f9" stroke-width="1.2" stroke-linecap="round"/><path d="M2.2 12.2c1.5-1.6 2.8-2.4 3.9-2.4 1 0 1.7.6 2.3 1.1.7.6 1.4 1.2 2.5 1.2 1 0 2-.5 3.1-1.6" stroke="#22d3ee" stroke-width="1.2" stroke-linecap="round"/></svg>',
-  idea: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#000000"/><rect x="2" y="2" width="12" height="12" fill="url(#paint0_linear)"/><path d="M5 11H7V5H5V11ZM9 11H11V8H9V11ZM9 6.5H11V5H9V6.5Z" fill="white"/><defs><linearGradient id="paint0_linear" x1="2" y1="2" x2="14" y2="14" gradientUnits="userSpaceOnUse"><stop stop-color="#FE2857"/><stop offset="1" stop-color="#05C9F9"/></linearGradient></defs></svg>',
   xcode: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#1c75db"/><path d="M4 12l2.5-8L12 12M5.5 8.5h5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   fallback: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="16" height="16" rx="4" fill="#555555"/><path d="M8 4L4 12h8L8 4z" fill="white"/></svg>',
 };
 
 let cachedEditorList = null;
+let pendingEditorListQuery = null;
 
 function normalizeEditorMenuItems(editors = []) {
   if (!Array.isArray(editors)) {
@@ -3111,7 +3235,45 @@ function normalizeEditorMenuItems(editors = []) {
   return normalized;
 }
 
-async function populateEditorMenu(view) {
+async function loadInstalledEditorList(options = {}) {
+  const forceRefresh = Boolean(options.forceRefresh);
+  if (forceRefresh) {
+    cachedEditorList = null;
+  }
+
+  if (Array.isArray(cachedEditorList)) {
+    return cachedEditorList;
+  }
+
+  if (pendingEditorListQuery) {
+    return pendingEditorListQuery;
+  }
+
+  if (!api?.app?.process?.queryEditors) {
+    cachedEditorList = [];
+    return cachedEditorList;
+  }
+
+  pendingEditorListQuery = (async () => {
+    try {
+      const result = await api.app.process.queryEditors();
+      if (result?.ok && Array.isArray(result.editors)) {
+        cachedEditorList = normalizeEditorMenuItems(result.editors);
+      } else {
+        cachedEditorList = [];
+      }
+    } catch (_error) {
+      cachedEditorList = [];
+    } finally {
+      pendingEditorListQuery = null;
+    }
+    return cachedEditorList;
+  })();
+
+  return pendingEditorListQuery;
+}
+
+async function populateEditorMenu(view, options = {}) {
   if (!view.editorMenu || !view.openButton || !view.openButtonIcon || !view.openButtonText || !view.openMenuButton) {
     return;
   }
@@ -3124,7 +3286,7 @@ async function populateEditorMenu(view) {
       view.openButtonText.textContent = "Open";
       view.openButtonIcon.innerHTML = EDITOR_ICONS.fallback;
       view.openButton.disabled = true;
-      view.openMenuButton.disabled = true;
+      view.openMenuButton.disabled = false;
 
       const empty = document.createElement("div");
       empty.className = "pane-editor-menu-empty";
@@ -3183,36 +3345,9 @@ async function populateEditorMenu(view) {
     }
   };
 
-  if (Array.isArray(cachedEditorList)) {
-    renderItems(cachedEditorList);
-    return;
-  }
-
-  cachedEditorList = [];
-  renderItems(cachedEditorList);
-
-  if (!api?.app?.process?.queryEditors) {
-    return;
-  }
-  try {
-    const result = await Promise.race([
-      api.app.process.queryEditors(),
-      new Promise((resolve) => setTimeout(
-        () => resolve({ ok: false, error: "editor-query-timeout", editors: [] }),
-        EDITOR_QUERY_TIMEOUT_MS,
-      )),
-    ]);
-    if (result?.ok && Array.isArray(result.editors)) {
-      cachedEditorList = normalizeEditorMenuItems(result.editors);
-      renderItems(cachedEditorList);
-      return;
-    }
-    cachedEditorList = [];
-    renderItems(cachedEditorList);
-  } catch (_error) {
-    cachedEditorList = [];
-    renderItems(cachedEditorList);
-  }
+  const forceRefresh = Boolean(options.forceRefresh);
+  await loadInstalledEditorList({ forceRefresh });
+  renderItems(Array.isArray(cachedEditorList) ? cachedEditorList : []);
 }
 
 function createPaneView(pane, index, preset, sessionMap) {
@@ -3456,6 +3591,7 @@ function createPaneView(pane, index, preset, sessionMap) {
     if (shouldHideClipboardPreviewByInput(data)) {
       hideClipboardPreview(view);
     }
+    captureUserQuestionInput(pane.sessionId, data);
     writeToSession(pane.sessionId, data, { silent: true });
   });
 
@@ -3484,8 +3620,9 @@ function createPaneView(pane, index, preset, sessionMap) {
     if (openMenuButton.disabled) {
       return;
     }
-    if (editorMenu.childElementCount <= 1) {
-      await populateEditorMenu(view);
+    const shouldForceRefresh = Array.isArray(cachedEditorList) && cachedEditorList.length === 0;
+    if (editorMenu.childElementCount <= 1 || shouldForceRefresh) {
+      await populateEditorMenu(view, { forceRefresh: shouldForceRefresh });
     }
     editorMenu.classList.toggle("is-open");
   });
@@ -3921,6 +4058,7 @@ function bindEvents() {
 
   state.eventUnsubscribers.push(
     api.pty.onExit((payload) => {
+      state.pendingQuestionInputBySessionId.delete(String(payload?.sessionId || ""));
       appendOutput(
         payload.sessionId,
         `\r\n[session ${payload.sessionId} exited: code=${payload.exitCode}, status=${payload.status}]\r\n`,
