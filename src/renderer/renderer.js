@@ -3086,71 +3086,70 @@ const EDITOR_ICONS = {
 
 let cachedEditorList = null;
 
-function getEditorMenuFallbackList() {
-  return [
-    { id: "idea", name: "IntelliJ IDEA" },
-    { id: "cursor", name: "Cursor" },
-    { id: "vscode", name: "VS Code" },
-    { id: "windsurf", name: "Windsurf" },
-    { id: "explorer", name: "Explorer" },
-  ];
-}
-
-function mergeEditorMenuItems(primaryItems = [], fallbackItems = []) {
-  const primaryById = new Map();
-  for (const item of primaryItems) {
-    const id = String(item?.id || "").trim();
-    if (!id) {
-      continue;
-    }
-    primaryById.set(id, item);
+function normalizeEditorMenuItems(editors = []) {
+  if (!Array.isArray(editors)) {
+    return [];
   }
 
-  const merged = [];
+  const normalized = [];
   const seen = new Set();
-  for (const fallback of fallbackItems) {
-    const id = String(fallback?.id || "").trim();
-    if (!id || seen.has(id)) {
+  for (const editor of editors) {
+    const id = String(editor?.id || "").trim();
+    const name = String(editor?.name || "").trim();
+    if (!id || !name || seen.has(id)) {
       continue;
     }
     seen.add(id);
-    merged.push(primaryById.get(id) || fallback);
-  }
 
-  for (const item of primaryItems) {
-    const id = String(item?.id || "").trim();
-    if (!id || seen.has(id)) {
-      continue;
+    const icon = typeof editor?.icon === "string" ? editor.icon.trim() : "";
+    if (icon) {
+      normalized.push({ id, name, icon });
+    } else {
+      normalized.push({ id, name });
     }
-    seen.add(id);
-    merged.push(item);
   }
-
-  return merged;
+  return normalized;
 }
 
 async function populateEditorMenu(view) {
-  if (!view.editorMenu || !view.openButtonIcon || !view.openButtonText) {
+  if (!view.editorMenu || !view.openButton || !view.openButtonIcon || !view.openButtonText || !view.openMenuButton) {
     return;
   }
 
   const renderItems = (items) => {
     view.editorMenu.innerHTML = '<div class="pane-editor-menu-header">Open in</div>';
 
-    // Always pre-select the first item (usually cursor or vscode) for the main button
-    if (items.length > 0 && !view.selectedEditorId) {
-      view.selectedEditorId = items[0].id;
-      view.openButtonText.textContent = items[0].name;
-      if (items[0].icon) {
-        view.openButtonIcon.innerHTML = `<img src="${items[0].icon}" alt="" style="width: 100%; height: 100%; object-fit: contain; border-radius: 3px;" />`;
-      } else {
-        view.openButtonIcon.innerHTML = EDITOR_ICONS[items[0].id] || EDITOR_ICONS.fallback;
-      }
+    if (!Array.isArray(items) || items.length === 0) {
+      view.selectedEditorId = null;
+      view.openButtonText.textContent = "Open";
+      view.openButtonIcon.innerHTML = EDITOR_ICONS.fallback;
+      view.openButton.disabled = true;
+      view.openMenuButton.disabled = true;
+
+      const empty = document.createElement("div");
+      empty.className = "pane-editor-menu-empty";
+      empty.textContent = "설치된 에디터 없음";
+      view.editorMenu.appendChild(empty);
+      return;
     }
+
+    const selectedEditor = items.find((item) => item.id === view.selectedEditorId) || items[0];
+    view.selectedEditorId = selectedEditor.id;
+    view.openButtonText.textContent = selectedEditor.name;
+    if (selectedEditor.icon) {
+      view.openButtonIcon.innerHTML = `<img src="${selectedEditor.icon}" alt="" style="width: 100%; height: 100%; object-fit: contain; border-radius: 3px;" />`;
+    } else {
+      view.openButtonIcon.innerHTML = EDITOR_ICONS[selectedEditor.id] || EDITOR_ICONS.fallback;
+    }
+    view.openButton.disabled = false;
+    view.openMenuButton.disabled = false;
 
     for (const editor of items) {
       const itemBtn = document.createElement("button");
       itemBtn.className = "pane-editor-menu-item";
+      if (editor.id === view.selectedEditorId) {
+        itemBtn.classList.add("is-selected");
+      }
 
       const iconSpan = document.createElement("span");
       iconSpan.className = "pane-editor-menu-icon";
@@ -3170,12 +3169,7 @@ async function populateEditorMenu(view) {
         e.stopPropagation();
         const isAlreadySelected = view.selectedEditorId === editor.id;
         view.selectedEditorId = editor.id;
-        view.openButtonText.textContent = editor.name;
-        if (editor.icon) {
-          view.openButtonIcon.innerHTML = `<img src="${editor.icon}" alt="" style="width: 100%; height: 100%; object-fit: contain; border-radius: 3px;" />`;
-        } else {
-          view.openButtonIcon.innerHTML = EDITOR_ICONS[editor.id] || EDITOR_ICONS.fallback;
-        }
+        renderItems(items);
         view.editorMenu.classList.remove("is-open");
         if (isAlreadySelected) {
           await openEditorForView(view, {
@@ -3190,13 +3184,12 @@ async function populateEditorMenu(view) {
   };
 
   if (Array.isArray(cachedEditorList)) {
-    renderItems(cachedEditorList.length > 0 ? cachedEditorList : getEditorMenuFallbackList());
+    renderItems(cachedEditorList);
     return;
   }
 
-  const fallbackList = getEditorMenuFallbackList();
-  cachedEditorList = fallbackList;
-  renderItems(fallbackList);
+  cachedEditorList = [];
+  renderItems(cachedEditorList);
 
   if (!api?.app?.process?.queryEditors) {
     return;
@@ -3210,11 +3203,15 @@ async function populateEditorMenu(view) {
       )),
     ]);
     if (result?.ok && Array.isArray(result.editors)) {
-      cachedEditorList = mergeEditorMenuItems(result.editors, fallbackList);
+      cachedEditorList = normalizeEditorMenuItems(result.editors);
       renderItems(cachedEditorList);
+      return;
     }
+    cachedEditorList = [];
+    renderItems(cachedEditorList);
   } catch (_error) {
-    // Keep fallback list already rendered.
+    cachedEditorList = [];
+    renderItems(cachedEditorList);
   }
 }
 
@@ -3290,6 +3287,7 @@ function createPaneView(pane, index, preset, sessionMap) {
   const openButton = document.createElement("button");
   openButton.type = "button";
   openButton.className = "pane-open-btn";
+  openButton.disabled = true;
 
   const openButtonIcon = document.createElement("span");
   openButtonIcon.className = "pane-open-icon";
@@ -3298,18 +3296,24 @@ function createPaneView(pane, index, preset, sessionMap) {
   const openButtonText = document.createElement("span");
   openButtonText.textContent = "Open";
 
+  const openMenuButton = document.createElement("button");
+  openMenuButton.type = "button";
+  openMenuButton.className = "pane-open-menu-btn";
+  openMenuButton.disabled = true;
+
   const openButtonChevron = document.createElement("span");
   openButtonChevron.className = "pane-open-chevron";
   openButtonChevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>';
 
   openButton.appendChild(openButtonIcon);
   openButton.appendChild(openButtonText);
-  openButton.appendChild(openButtonChevron);
+  openMenuButton.appendChild(openButtonChevron);
 
   const editorMenu = document.createElement("div");
   editorMenu.className = "pane-editor-menu";
 
   editorGroup.appendChild(openButton);
+  editorGroup.appendChild(openMenuButton);
   editorGroup.appendChild(editorMenu);
 
   const terminalHost = document.createElement("div");
@@ -3410,6 +3414,7 @@ function createPaneView(pane, index, preset, sessionMap) {
     fullAccessButton,
     editorGroup,
     openButton,
+    openMenuButton,
     openButtonIcon,
     openButtonText,
     editorMenu,
@@ -3470,21 +3475,19 @@ function createPaneView(pane, index, preset, sessionMap) {
   });
   openButton.addEventListener("click", async (event) => {
     event.stopPropagation();
+    editorMenu.classList.remove("is-open");
+    await openEditorForView(view);
+  });
 
+  openMenuButton.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    if (openMenuButton.disabled) {
+      return;
+    }
     if (editorMenu.childElementCount <= 1) {
       await populateEditorMenu(view);
     }
-
-    // Default click opens/closes the list for reliability.
-    const forceDirectOpen = Boolean(event.shiftKey || event.ctrlKey || event.metaKey);
-    if (!forceDirectOpen) {
-      editorMenu.classList.toggle("is-open");
-      return;
-    }
-
-    editorMenu.classList.remove("is-open");
-
-    await openEditorForView(view);
+    editorMenu.classList.toggle("is-open");
   });
 
   // Close menu when clicking outside

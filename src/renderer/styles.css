@@ -580,6 +580,7 @@ button:hover {
 .pane-editor-group {
   position: relative;
   display: inline-flex;
+  align-items: stretch;
   z-index: 20;
 }
 
@@ -589,8 +590,9 @@ button:hover {
   gap: 6px;
   height: 24px;
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: 6px 0 0 6px;
   border: 1px solid var(--border);
+  border-right: 0;
   background: #2d2d30;
   color: var(--text);
   font-size: 12px;
@@ -603,6 +605,43 @@ button:hover {
 .pane-open-btn:hover {
   background: #3e3e42;
   border-color: rgba(181, 181, 181, 0.4);
+  border-right-color: var(--border);
+}
+
+.pane-open-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  color: #7a7a7a;
+  border-color: #343434;
+  border-right-color: #343434;
+  background: #2d2d30;
+}
+
+.pane-open-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 0 6px 6px 0;
+  background: #2d2d30;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pane-open-menu-btn:hover {
+  background: #3e3e42;
+  border-color: rgba(181, 181, 181, 0.4);
+}
+
+.pane-open-menu-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  color: #7a7a7a;
+  border-color: #343434;
+  background: #2d2d30;
 }
 
 .pane-open-icon {
@@ -663,11 +702,21 @@ button:hover {
   background: #37373d;
 }
 
+.pane-editor-menu-item.is-selected {
+  background: rgba(14, 99, 156, 0.24);
+}
+
 .pane-editor-menu-icon {
   width: 16px;
   height: 16px;
   object-fit: contain;
   border-radius: 3px;
+}
+
+.pane-editor-menu-empty {
+  padding: 8px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .pane-terminate-btn {

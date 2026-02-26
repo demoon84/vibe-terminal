@@ -53,6 +53,11 @@
 - 변경 파일: `src/renderer/renderer.js`
 - 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "isAlreadySelected|itemBtn.addEventListener\\(\"click\", async|openEditorForView" src/renderer/renderer.js`로 조건 실행 경로 반영 확인.
 
+### 11) 에디터 열기 버튼 영역 분리 및 설치 목록 전용 표시
+- 요청 요약: 왼쪽 영역은 선택된 에디터로 즉시 열기, 오른쪽 화살표 영역은 목록 토글만 수행하도록 분리하고, 드롭다운에는 설치된 에디터만 표시되도록 수정.
+- 변경 파일: `src/renderer/renderer.js`, `src/renderer/styles.css`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n -e "normalizeEditorMenuItems" -e "openMenuButton" -e "pane-open-menu-btn" -e "설치된 에디터 없음" -e "is-selected" src/renderer/renderer.js src/renderer/styles.css`로 분리 버튼/설치 목록/선택 처리 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
