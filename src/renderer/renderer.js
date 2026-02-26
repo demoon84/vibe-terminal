@@ -3063,6 +3063,39 @@ function getEditorMenuFallbackList() {
   ];
 }
 
+function mergeEditorMenuItems(primaryItems = [], fallbackItems = []) {
+  const primaryById = new Map();
+  for (const item of primaryItems) {
+    const id = String(item?.id || "").trim();
+    if (!id) {
+      continue;
+    }
+    primaryById.set(id, item);
+  }
+
+  const merged = [];
+  const seen = new Set();
+  for (const fallback of fallbackItems) {
+    const id = String(fallback?.id || "").trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    merged.push(primaryById.get(id) || fallback);
+  }
+
+  for (const item of primaryItems) {
+    const id = String(item?.id || "").trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    merged.push(item);
+  }
+
+  return merged;
+}
+
 async function populateEditorMenu(view) {
   if (!view.editorMenu || !view.openButtonIcon || !view.openButtonText) {
     return;
@@ -3136,8 +3169,8 @@ async function populateEditorMenu(view) {
         EDITOR_QUERY_TIMEOUT_MS,
       )),
     ]);
-    if (result?.ok && Array.isArray(result.editors) && result.editors.length > 0) {
-      cachedEditorList = result.editors;
+    if (result?.ok && Array.isArray(result.editors)) {
+      cachedEditorList = mergeEditorMenuItems(result.editors, fallbackList);
       renderItems(cachedEditorList);
     }
   } catch (_error) {

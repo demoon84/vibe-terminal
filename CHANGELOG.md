@@ -38,6 +38,11 @@
 - 변경 파일: `src/renderer/styles.css`, `src/renderer/renderer.js`
 - 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "pane-header|pane-editor-group|pane-editor-menu|handleEditorMenuOutsideClick|childElementCount <= 1" src/renderer/styles.css src/renderer/renderer.js`로 관련 보강점 확인.
 
+### 8) 분할 변경 시 explorer만 남는 에디터 목록 병합 수정
+- 요청 요약: `queryEditors` 응답이 일부 항목만 반환돼도 fallback 목록과 병합해 IntelliJ/Cursor/VS Code/Windsurf/Explorer가 유지되도록 수정.
+- 변경 파일: `src/renderer/renderer.js`
+- 검증 결과: `node --check src/renderer/renderer.js` 통과, `rg -n "mergeEditorMenuItems|getEditorMenuFallbackList|populateEditorMenu" src/renderer/renderer.js`로 병합 로직 반영 확인.
+
 ## 2026-02-21
 ### 1) 규칙 설정 화면 `AGENTS.md` 동기화 수정
 - 요청 요약: 규칙 설정 화면에서 최신 `AGENTS.md` 내용이 반영되지 않는 문제 수정.
