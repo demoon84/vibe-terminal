@@ -104,16 +104,6 @@ function isPowerShellShell(shell) {
   );
 }
 
-function isPowerShell7(shell) {
-  const normalized = String(shell || "").toLowerCase();
-  return (
-    normalized === "pwsh" ||
-    normalized === "pwsh.exe" ||
-    normalized.endsWith("\\pwsh.exe") ||
-    normalized.endsWith("/pwsh.exe")
-  );
-}
-
 function isCmdShell(shell) {
   const normalized = String(shell || "").toLowerCase();
   return (
@@ -174,23 +164,8 @@ function applyUtf8LocaleSettings(env) {
   env.LC_ALL = fallbackLocale;
 }
 
-function setWindowsEnvVariable(env, key, value) {
-  const existingKey = Object.keys(env).find(
-    (candidate) => String(candidate).toLowerCase() === String(key).toLowerCase(),
-  );
-  if (existingKey) {
-    env[existingKey] = value;
-    return;
-  }
-  env[key] = value;
-}
-
 function buildTerminalEnv(extraEnv = {}, shell = "") {
   const merged = { ...process.env, ...extraEnv };
-  if (process.platform === "win32" && isPowerShell7(shell)) {
-    setWindowsEnvVariable(merged, "ComSpec", shell);
-    setWindowsEnvVariable(merged, "COMSPEC", shell);
-  }
   if (TERMINAL_COLOR_MODE === "force") {
     delete merged.NO_COLOR;
     merged.FORCE_COLOR = "1";

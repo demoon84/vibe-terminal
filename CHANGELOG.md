@@ -2,6 +2,12 @@
 
 이 문서는 작업 이력을 기록한다.
 
+## 2026-02-27
+### 1) Windows PowerShell 세션의 `.CMD` 자기재귀 생성 방지
+- 요청 요약: PowerShell 프로세스가 계속 늘어나는 원인을 조사한 결과, 세션 환경에서 `ComSpec/COMSPEC`을 `pwsh.exe`로 덮어써 `.CMD` 실행 시 `pwsh /c ...` 재귀 체인이 발생하던 문제를 수정.
+- 변경 파일: `src/main/session-manager.js`
+- 검증 결과: `node --check src/main/session-manager.js` 통과, `rg -n "ComSpec|COMSPEC|isPowerShell7\\(" src/main/session-manager.js` 결과 없음으로 관련 오버라이드 제거 확인, 프로세스 조사에서 `timeHook\\node_modules\\.bin\\tsc.CMD`/`eslint.CMD` 연쇄 생성 패턴과 `ComSpec=pwsh.exe` 상태 확인.
+
 ## 2026-02-26
 ### 1) 스킬관리/규칙설정/앱 전역 스크롤바 스타일 통일
 - 요청 요약: 스킬관리 영역, 규칙 설정 스크롤 영역, 앱 전체 스크롤바를 동일한 커스텀 스타일로 통일.
