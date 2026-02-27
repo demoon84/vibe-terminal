@@ -13,6 +13,11 @@
 - 변경 파일: `src/shared/ipc-channels.js`, `src/preload/preload.js`, `src/main/ipc-validators.js`, `src/main/main.js`, `src/renderer/renderer.js`
 - 검증 결과: `node --check src/shared/ipc-channels.js` 통과, `node --check src/preload/preload.js` 통과, `node --check src/main/ipc-validators.js` 통과, `node --check src/main/main.js` 통과, `node --check src/renderer/renderer.js` 통과, `rg -n "APP_SHOW_NOTIFICATION|validateNotificationPayload|showDesktopNotification|maybeNotifyConfirmationRequired|maybeNotifySessionExit" src/shared/ipc-channels.js src/preload/preload.js src/main/ipc-validators.js src/main/main.js src/renderer/renderer.js`로 알림 채널/검증/트리거 경로 반영 확인.
 
+### 3) 버전 `1.0.4` 상향 및 Windows 설치형 패키징 안정화
+- 요청 요약: 버전을 `1.0.4`로 상향하고 설치형(NSIS) 패키징을 완료. Windows `node-pty` 재빌드 실패(`MSB8040`) 회피를 위해 `electron-builder`의 `npmRebuild`를 비활성화.
+- 변경 파일: `package.json`
+- 검증 결과: `node -p "require('./package.json').version"` 결과 `1.0.4`, `npm run package:installer` 성공(종료코드 0), 산출물 `release/Vibe Terminal Setup 1.0.4.exe` 생성 확인.
+
 ## 2026-02-26
 ### 1) 스킬관리/규칙설정/앱 전역 스크롤바 스타일 통일
 - 요청 요약: 스킬관리 영역, 규칙 설정 스크롤 영역, 앱 전체 스크롤바를 동일한 커스텀 스타일로 통일.
