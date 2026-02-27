@@ -5,7 +5,7 @@ const os = require("os");
 const { TextDecoder } = require("util");
 const { pathToFileURL } = require("url");
 const { spawn, spawnSync } = require("child_process");
-const { app, BrowserWindow, dialog, ipcMain, Menu, clipboard, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, clipboard, shell, Notification } = require("electron");
 const pty = require("node-pty");
 const { IPC_CHANNELS } = require("../shared/ipc-channels");
 const { getDefaultShell } = require("../shared/models");
@@ -25,6 +25,7 @@ const {
   validateSkillInstallPayload,
   validateSkillNamePayload,
   validateClipboardWritePayload,
+  validateNotificationPayload,
   validateAgentsPolicyWritePayload,
 } = require("./ipc-validators");
 
@@ -221,6 +222,57 @@ function isClipboardIpcAllowed(event) {
     CLIPBOARD_RATE_LIMIT_WINDOW_MS,
     CLIPBOARD_RATE_LIMIT_MAX_CALLS,
   );
+}
+
+function normalizeNotificationCategory(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (
+    normalized === "completion"
+    || normalized === "confirmation"
+    || normalized === "error"
+  ) {
+    return normalized;
+  }
+  return "info";
+}
+
+function showDesktopNotification(payload = {}) {
+  if (typeof Notification !== "function" || !Notification.isSupported()) {
+    return {
+      ok: false,
+      error: "notification-not-supported",
+    };
+  }
+
+  const title = String(payload.title || "").trim();
+  const body = String(payload.body || "").trim();
+  const category = normalizeNotificationCategory(payload.category);
+  if (!title) {
+    return {
+      ok: false,
+      error: "invalid-title",
+    };
+  }
+
+  const iconPath = APP_ICON_PATH || undefined;
+  const silent = category !== "error";
+  try {
+    const notification = new Notification({
+      title,
+      body,
+      icon: iconPath,
+      silent,
+    });
+    notification.show();
+    return {
+      ok: true,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function cleanupSessions(reason) {
@@ -4146,6 +4198,17 @@ app.whenReady().then(() => {
     }
     clipboard.writeText(validated.value.text);
     return { ok: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_SHOW_NOTIFICATION, (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      return { ok: false, error: "forbidden" };
+    }
+    const validated = validateNotificationPayload(payload);
+    if (!validated.ok) {
+      return { ok: false, error: validated.error };
+    }
+    return showDesktopNotification(validated.value);
   });
 
   ipcMain.handle("app:query-editors", async (event) => {

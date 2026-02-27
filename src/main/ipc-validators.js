@@ -7,6 +7,8 @@ const MAX_PATH_CHARS = 1024;
 const MAX_ENV_KEY_CHARS = 128;
 const MAX_ENV_VALUE_CHARS = 4096;
 const MAX_AGENTS_POLICY_CHARS = 2_000_000;
+const MAX_NOTIFICATION_TITLE_CHARS = 120;
+const MAX_NOTIFICATION_BODY_CHARS = 480;
 
 const CAPABILITY_TOKEN_MIN_LENGTH = 16;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -354,6 +356,44 @@ function validateClipboardWritePayload(payload) {
   return { ok: true, value: { text: payload.text } };
 }
 
+function validateNotificationPayload(payload) {
+  if (!isPlainObject(payload)) {
+    return { ok: false, error: "invalid-payload" };
+  }
+
+  const title = asTrimmedString(payload.title);
+  if (!title) {
+    return { ok: false, error: "invalid-payload:title" };
+  }
+  if (title.length > MAX_NOTIFICATION_TITLE_CHARS) {
+    return { ok: false, error: "invalid-payload:title-too-long" };
+  }
+
+  const body = asTrimmedString(payload.body);
+  if (body.length > MAX_NOTIFICATION_BODY_CHARS) {
+    return { ok: false, error: "invalid-payload:body-too-long" };
+  }
+
+  const category = asTrimmedString(payload.category).toLowerCase() || "info";
+  if (
+    category !== "info"
+    && category !== "completion"
+    && category !== "confirmation"
+    && category !== "error"
+  ) {
+    return { ok: false, error: "invalid-payload:category" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      title,
+      body,
+      category,
+    },
+  };
+}
+
 function validateAgentsPolicyWritePayload(payload) {
   if (!isPlainObject(payload) || typeof payload.content !== "string") {
     return { ok: false, error: "invalid-payload" };
@@ -396,5 +436,6 @@ module.exports = {
   validateSkillInstallPayload,
   validateSkillNamePayload,
   validateClipboardWritePayload,
+  validateNotificationPayload,
   validateAgentsPolicyWritePayload,
 };

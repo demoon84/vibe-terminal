@@ -8,6 +8,11 @@
 - 변경 파일: `src/main/session-manager.js`
 - 검증 결과: `node --check src/main/session-manager.js` 통과, `rg -n "ComSpec|COMSPEC|isPowerShell7\\(" src/main/session-manager.js` 결과 없음으로 관련 오버라이드 제거 확인, 프로세스 조사에서 `timeHook\\node_modules\\.bin\\tsc.CMD`/`eslint.CMD` 연쇄 생성 패턴과 `ComSpec=pwsh.exe` 상태 확인.
 
+### 2) 작업 완료/확인 필요 상황의 OS 알림(Desktop Notification) 추가
+- 요청 요약: 사용자 부재 시에도 상태를 인지할 수 있도록, 에이전트 세션 종료(완료/오류) 및 터미널 확인 프롬프트 감지 시 OS 알림을 보내는 경로를 추가.
+- 변경 파일: `src/shared/ipc-channels.js`, `src/preload/preload.js`, `src/main/ipc-validators.js`, `src/main/main.js`, `src/renderer/renderer.js`
+- 검증 결과: `node --check src/shared/ipc-channels.js` 통과, `node --check src/preload/preload.js` 통과, `node --check src/main/ipc-validators.js` 통과, `node --check src/main/main.js` 통과, `node --check src/renderer/renderer.js` 통과, `rg -n "APP_SHOW_NOTIFICATION|validateNotificationPayload|showDesktopNotification|maybeNotifyConfirmationRequired|maybeNotifySessionExit" src/shared/ipc-channels.js src/preload/preload.js src/main/ipc-validators.js src/main/main.js src/renderer/renderer.js`로 알림 채널/검증/트리거 경로 반영 확인.
+
 ## 2026-02-26
 ### 1) 스킬관리/규칙설정/앱 전역 스크롤바 스타일 통일
 - 요청 요약: 스킬관리 영역, 규칙 설정 스크롤 영역, 앱 전체 스크롤바를 동일한 커스텀 스타일로 통일.

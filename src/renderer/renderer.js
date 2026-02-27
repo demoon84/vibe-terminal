@@ -24,11 +24,22 @@ const TERMINAL_FONT_SIZE_MAX = 24;
 const TERMINAL_FONT_STORAGE_KEY = "vibe-terminal.terminal-font-family";
 const TERMINAL_FONT_SIZE_STORAGE_KEY = "vibe-terminal.terminal-font-size";
 const AGENT_AUTO_INSTALL_SKIP_STORAGE_KEY = "vibe-terminal.agent-auto-install-skip";
+const DESKTOP_NOTIFICATION_ENABLED_STORAGE_KEY = "vibe-terminal.desktop-notifications-enabled";
 const SKILL_MANAGER_DEFAULT_DESCRIPTION = "설명이 등록되지 않은 스킬";
 const SKILL_MANAGER_REMOTE_QUERY_MIN = 2;
 const SKILL_MANAGER_SEARCH_DEBOUNCE_MS = 260;
 const USER_QUESTION_BUFFER_MAX_CHARS = 600;
 const USER_QUESTION_TEXT_MAX_CHARS = 220;
+const DESKTOP_NOTIFICATION_MIN_INTERVAL_MS = 6_000;
+const TERMINAL_CONFIRMATION_NOTIFY_COOLDOWN_MS = 12_000;
+const NOTIFICATION_TERMINAL_PREVIEW_MAX_CHARS = 180;
+const TERMINAL_CONFIRMATION_PATTERNS = Object.freeze([
+  /\[(?:\s*)y\/n(?:\s*)\]/i,
+  /\[(?:\s*)y\/N(?:\s*)\]/,
+  /\b(?:y\/n|yes\/no|confirm|approval required|requires approval)\b/i,
+  /\b(?:do you want|are you sure|press enter to continue|continue\?)\b/i,
+  /(?:승인 필요|확인 필요|진행하시겠|계속하시겠|계속할까요)/,
+]);
 const TERMINAL_FONT_OPTIONS = Object.freeze([
   Object.freeze({
     label: "D2Coding (기본)",
@@ -141,6 +152,9 @@ const state = {
   agentsPolicyInitialContent: "",
   agentsPolicyLoadedMtimeMs: null,
   pendingQuestionInputBySessionId: new Map(),
+  desktopNotificationsEnabled: true,
+  lastDesktopNotificationAtByKey: new Map(),
+  lastConfirmationNotificationAtBySessionId: new Map(),
   terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
 };
@@ -152,6 +166,198 @@ function setStatusLine(message) {
   const timestamp = new Date().toLocaleTimeString();
   const detail = typeof message === "string" && message.length > 0 ? ` | ${message}` : "";
   ui.statusLine.textContent = `${timestamp}${detail}`;
+}
+
+function readStoredDesktopNotificationEnabled() {
+  try {
+    const raw = String(localStorage.getItem(DESKTOP_NOTIFICATION_ENABLED_STORAGE_KEY) || "")
+      .trim()
+      .toLowerCase();
+    if (raw === "0" || raw === "false" || raw === "off") {
+      return false;
+    }
+    if (raw === "1" || raw === "true" || raw === "on") {
+      return true;
+    }
+  } catch (_error) {
+    // Ignore storage read failures.
+  }
+  return true;
+}
+
+function normalizeNotificationText(value, maxChars = NOTIFICATION_TERMINAL_PREVIEW_MAX_CHARS) {
+  const collapsed = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!collapsed) {
+    return "";
+  }
+  if (!Number.isFinite(maxChars) || maxChars < 8 || collapsed.length <= maxChars) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, Math.max(5, maxChars - 3))}...`;
+}
+
+function isDesktopNotificationCategory(value) {
+  return (
+    value === "info"
+    || value === "completion"
+    || value === "confirmation"
+    || value === "error"
+  );
+}
+
+function shouldSendDesktopNotification() {
+  if (!state.desktopNotificationsEnabled) {
+    return false;
+  }
+  if (!api?.app?.process?.showNotification) {
+    return false;
+  }
+  if (typeof document.hasFocus === "function" && document.hasFocus()) {
+    return false;
+  }
+  return true;
+}
+
+function shouldThrottleDesktopNotification(key, minIntervalMs = DESKTOP_NOTIFICATION_MIN_INTERVAL_MS) {
+  const now = Date.now();
+  const normalizedKey = String(key || "").trim().toLowerCase();
+  if (!normalizedKey) {
+    return false;
+  }
+
+  const previousAt = Number(state.lastDesktopNotificationAtByKey.get(normalizedKey) || 0);
+  if (previousAt > 0 && now - previousAt < minIntervalMs) {
+    return true;
+  }
+  state.lastDesktopNotificationAtByKey.set(normalizedKey, now);
+  return false;
+}
+
+function sendDesktopNotification(title, body, options = {}) {
+  if (!shouldSendDesktopNotification()) {
+    return false;
+  }
+
+  const normalizedTitle = normalizeNotificationText(title, 80);
+  if (!normalizedTitle) {
+    return false;
+  }
+  const normalizedBody = normalizeNotificationText(body, NOTIFICATION_TERMINAL_PREVIEW_MAX_CHARS);
+  const category = isDesktopNotificationCategory(options.category) ? options.category : "info";
+  const throttleKeySeed = normalizeNotificationText(options.key || normalizedTitle, 120);
+  const throttleKey = `${category}:${throttleKeySeed}`;
+  const minIntervalMs = Number.isFinite(options.minIntervalMs)
+    ? Math.max(0, Number(options.minIntervalMs))
+    : DESKTOP_NOTIFICATION_MIN_INTERVAL_MS;
+  if (shouldThrottleDesktopNotification(throttleKey, minIntervalMs)) {
+    return false;
+  }
+
+  api.app.process.showNotification({
+    title: normalizedTitle,
+    body: normalizedBody,
+    category,
+  }).catch(() => {
+    // Ignore notification transport failures.
+  });
+  return true;
+}
+
+function getAgentLabelBySessionId(sessionId) {
+  const remembered = getRememberedAgentSelection(sessionId);
+  if (!remembered) {
+    return "";
+  }
+  return AGENT_COMMAND_LABELS[remembered] || remembered;
+}
+
+function normalizeTerminalOutputForNotification(data) {
+  return String(data || "")
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "\n")
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "")
+    .replace(/\r/g, "\n");
+}
+
+function findTerminalConfirmationPrompt(data) {
+  const normalizedOutput = normalizeTerminalOutputForNotification(data);
+  if (!normalizedOutput) {
+    return "";
+  }
+
+  const lines = normalizedOutput
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-8);
+
+  for (const line of lines) {
+    const normalizedLine = normalizeNotificationText(line, NOTIFICATION_TERMINAL_PREVIEW_MAX_CHARS);
+    if (!normalizedLine) {
+      continue;
+    }
+    for (const pattern of TERMINAL_CONFIRMATION_PATTERNS) {
+      if (pattern.test(normalizedLine)) {
+        return normalizedLine;
+      }
+    }
+  }
+  return "";
+}
+
+function maybeNotifyConfirmationRequired(sessionId, data) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+
+  const promptLine = findTerminalConfirmationPrompt(data);
+  if (!promptLine) {
+    return;
+  }
+
+  const now = Date.now();
+  const lastAt = Number(state.lastConfirmationNotificationAtBySessionId.get(normalizedSessionId) || 0);
+  if (lastAt > 0 && now - lastAt < TERMINAL_CONFIRMATION_NOTIFY_COOLDOWN_MS) {
+    return;
+  }
+  state.lastConfirmationNotificationAtBySessionId.set(normalizedSessionId, now);
+
+  const agentLabel = getAgentLabelBySessionId(normalizedSessionId);
+  const title = agentLabel ? `${agentLabel} 확인 필요` : "확인 필요";
+  sendDesktopNotification(title, promptLine, {
+    category: "confirmation",
+    key: `confirm:${normalizedSessionId}:${promptLine}`,
+    minIntervalMs: TERMINAL_CONFIRMATION_NOTIFY_COOLDOWN_MS,
+  });
+}
+
+function maybeNotifySessionExit(payload) {
+  const sessionId = String(payload?.sessionId || "").trim();
+  if (!sessionId) {
+    return;
+  }
+
+  const agentLabel = getAgentLabelBySessionId(sessionId);
+  if (!agentLabel) {
+    return;
+  }
+
+  const status = String(payload?.status || "").trim() || "unknown";
+  const exitCodeNumber = Number(payload?.exitCode);
+  const exitCode = Number.isFinite(exitCodeNumber) ? String(exitCodeNumber) : String(payload?.exitCode || "");
+  const isSuccess = exitCode === "0" && status === "stopped";
+  sendDesktopNotification(
+    isSuccess ? `${agentLabel} 작업 종료` : `${agentLabel} 종료 감지`,
+    `세션 ${sessionId} (status=${status}, code=${exitCode || "?"})`,
+    {
+      category: isSuccess ? "completion" : "error",
+      key: `exit:${sessionId}:${status}:${exitCode}`,
+      minIntervalMs: 1_000,
+    },
+  );
 }
 
 function normalizeQuestionInlineText(value) {
@@ -1674,6 +1880,7 @@ function clearPaneViews() {
     rememberPaneSnapshot(view);
     if (view?.sessionId) {
       state.pendingQuestionInputBySessionId.delete(view.sessionId);
+      state.lastConfirmationNotificationAtBySessionId.delete(view.sessionId);
     }
     if (view.resizeObserver) {
       view.resizeObserver.disconnect();
@@ -4052,13 +4259,16 @@ function bindEvents() {
 
   state.eventUnsubscribers.push(
     api.pty.onData((payload) => {
+      maybeNotifyConfirmationRequired(payload?.sessionId, payload?.data);
       appendOutput(payload.sessionId, payload.data);
     }),
   );
 
   state.eventUnsubscribers.push(
     api.pty.onExit((payload) => {
+      maybeNotifySessionExit(payload);
       state.pendingQuestionInputBySessionId.delete(String(payload?.sessionId || ""));
+      state.lastConfirmationNotificationAtBySessionId.delete(String(payload?.sessionId || ""));
       appendOutput(
         payload.sessionId,
         `\r\n[session ${payload.sessionId} exited: code=${payload.exitCode}, status=${payload.status}]\r\n`,
@@ -4094,6 +4304,7 @@ async function bootstrap() {
   state.terminalFontFamily = readStoredTerminalFontFamily();
   state.terminalFontSize = readStoredTerminalFontSize();
   state.autoInstallSkippedAgents = readStoredAutoInstallSkippedAgents();
+  state.desktopNotificationsEnabled = readStoredDesktopNotificationEnabled();
   applyTerminalFontSettings(
     {
       fontFamily: state.terminalFontFamily,

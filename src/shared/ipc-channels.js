@@ -37,6 +37,7 @@ const IPC_CHANNELS = Object.freeze({
   APP_CLIPBOARD_READ: "app:clipboard-read",
   APP_CLIPBOARD_IMAGE_TO_TEMP: "app:clipboard-image-to-temp",
   APP_CLIPBOARD_WRITE: "app:clipboard-write",
+  APP_SHOW_NOTIFICATION: "app:show-notification",
   APP_QUERY_EDITORS: "app:query-editors",
   APP_OPEN_IN_EDITOR: "app:open-in-editor",
   APP_READ_AGENTS_POLICY: "app:read-agents-policy",
