@@ -1,18 +1,23 @@
 const DEFAULT_PRESET_LAYOUTS = Object.freeze({
   "1x1": { id: "1x1", columns: 1, rows: 1, panelCount: 1 },
   "1x2": { id: "1x2", columns: 2, rows: 1, panelCount: 2 },
+  "1x3": { id: "1x3", columns: 3, rows: 1, panelCount: 3 },
   "1x4": { id: "1x4", columns: 2, rows: 2, panelCount: 4 },
-  "2x6": { id: "2x6", columns: 3, rows: 2, panelCount: 6 },
-  "2x8": { id: "2x8", columns: 4, rows: 2, panelCount: 8 },
-
 });
+const DEFAULT_LAYOUT_CONSTRAINTS = Object.freeze({
+  minPanelWidthPx: 220,
+  minPanelHeightPx: 160,
+  splitterSizePx: 1,
+  splitterHitAreaPx: 16,
+});
+const GRID_SPLITTER_SELECTOR = ".pane-grid-splitter";
 
 const runtimeWindow = /** @type {any} */ (window);
 const api = runtimeWindow.multiTerminal;
 const TerminalCtor = runtimeWindow.Terminal;
 const FitAddonCtor = runtimeWindow.FitAddon?.FitAddon;
 const TERMINAL_SCROLLBACK = 50000;
-const INITIAL_PRESET_ID = "1x2";
+const INITIAL_PRESET_ID = "1x1";
 const CTRL_C_CONFIRM_WINDOW_MS = 1200;
 const TERMINAL_FIT_DEBOUNCE_MS = 50;
 const TERMINAL_SNAPSHOT_MAX_LINES = 1000;
@@ -33,6 +38,7 @@ const USER_QUESTION_TEXT_MAX_CHARS = 220;
 const DESKTOP_NOTIFICATION_MIN_INTERVAL_MS = 6_000;
 const TERMINAL_CONFIRMATION_NOTIFY_COOLDOWN_MS = 12_000;
 const NOTIFICATION_TERMINAL_PREVIEW_MAX_CHARS = 180;
+const PANE_SWAP_DRAG_THRESHOLD_PX = 6;
 const TERMINAL_CONFIRMATION_PATTERNS = Object.freeze([
   /\[(?:\s*)y\/n(?:\s*)\]/i,
   /\[(?:\s*)y\/N(?:\s*)\]/,
@@ -87,6 +93,20 @@ const AGENT_COMMAND_LABELS = Object.freeze({
   gemini: "Gemini",
 });
 const REQUIRED_AGENT_COMMANDS = Object.freeze(["codex", "claude", "gemini"]);
+const ATTENTION_PRESETS = Object.freeze({
+  confirmation: Object.freeze({
+    label: "승인대기",
+    className: "is-attention-confirmation",
+  }),
+  completion: Object.freeze({
+    label: "완료",
+    className: "is-attention-completion",
+  }),
+  error: Object.freeze({
+    label: "종료",
+    className: "is-attention-error",
+  }),
+});
 
 const ui = {
   grid: document.getElementById("pane-grid"),
@@ -101,7 +121,6 @@ const ui = {
   titlebarPathSettingButton: document.getElementById("titlebar-path-setting-btn"),
   titlebarFontSettingButton: document.getElementById("titlebar-font-setting-btn"),
   titlebarSkillManagerButton: document.getElementById("titlebar-skill-manager-btn"),
-  titlebarEditAgentsButton: document.getElementById("titlebar-edit-agents-btn"),
   titlebarMountCodexButton: document.getElementById("titlebar-mount-codex-btn"),
   titlebarMountClaudeButton: document.getElementById("titlebar-mount-claude-btn"),
   titlebarMountGeminiButton: document.getElementById("titlebar-mount-gemini-btn"),
@@ -118,14 +137,6 @@ const ui = {
   skillManagerSearchInput: /** @type {HTMLInputElement | null} */ (document.getElementById("skill-manager-search-input")),
   skillManagerUpdatedAt: document.getElementById("skill-manager-updated-at"),
   skillManagerCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("skill-manager-cancel-btn")),
-  agentsPolicyOverlay: document.getElementById("agents-policy-overlay"),
-  agentsPolicyPath: document.getElementById("agents-policy-path"),
-  agentsPolicyEditor: /** @type {HTMLTextAreaElement | null} */ (document.getElementById("agents-policy-editor")),
-  agentsPolicyCancelButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-cancel-btn")),
-  agentsPolicySaveButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-save-btn")),
-  agentsPolicyReloadButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-reload-btn")),
-  agentsPolicyOpenEditorButton: /** @type {HTMLButtonElement | null} */ (document.getElementById("agents-policy-open-editor-btn")),
-
 };
 
 const state = {
@@ -146,17 +157,17 @@ const state = {
   skillCatalog: [],
   skillManagerSearchQuery: "",
   skillManagerSearchTimerId: null,
-  isAgentsPolicyLoading: false,
-  isAgentsPolicySaving: false,
-  agentsPolicyPath: "",
-  agentsPolicyInitialContent: "",
-  agentsPolicyLoadedMtimeMs: null,
   pendingQuestionInputBySessionId: new Map(),
   desktopNotificationsEnabled: true,
   lastDesktopNotificationAtByKey: new Map(),
   lastConfirmationNotificationAtBySessionId: new Map(),
   terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
   terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
+  activeGridResize: null,
+  activePaneSwap: null,
+  terminalProfiles: [],
+  attentionBySessionId: new Map(),
+  expectedExitBySessionId: new Map(),
 };
 
 function setStatusLine(message) {
@@ -332,6 +343,7 @@ function maybeNotifyConfirmationRequired(sessionId, data) {
     key: `confirm:${normalizedSessionId}:${promptLine}`,
     minIntervalMs: TERMINAL_CONFIRMATION_NOTIFY_COOLDOWN_MS,
   });
+  setPaneAttention(normalizedSessionId, "confirmation", promptLine);
 }
 
 function maybeNotifySessionExit(payload) {
@@ -349,6 +361,7 @@ function maybeNotifySessionExit(payload) {
   const exitCodeNumber = Number(payload?.exitCode);
   const exitCode = Number.isFinite(exitCodeNumber) ? String(exitCodeNumber) : String(payload?.exitCode || "");
   const isSuccess = exitCode === "0" && status === "stopped";
+  setPaneAttention(sessionId, isSuccess ? "completion" : "error", `${status}:${exitCode || "?"}`);
   sendDesktopNotification(
     isSuccess ? `${agentLabel} 작업 종료` : `${agentLabel} 종료 감지`,
     `세션 ${sessionId} (status=${status}, code=${exitCode || "?"})`,
@@ -358,6 +371,228 @@ function maybeNotifySessionExit(payload) {
       minIntervalMs: 1_000,
     },
   );
+}
+
+function normalizeShellKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .toLowerCase();
+}
+
+function getShellBasename(value) {
+  const normalized = String(value || "").trim().replace(/\\/g, "/");
+  if (!normalized) {
+    return "";
+  }
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+  return segments.length > 0 ? segments[segments.length - 1] : normalized;
+}
+
+function areShellsEquivalent(left, right) {
+  const leftKey = normalizeShellKey(left);
+  const rightKey = normalizeShellKey(right);
+  if (!leftKey || !rightKey) {
+    return false;
+  }
+  if (leftKey === rightKey) {
+    return true;
+  }
+  return getShellBasename(leftKey) === getShellBasename(rightKey);
+}
+
+function getTerminalProfileByShell(shell) {
+  const profiles = Array.isArray(state.terminalProfiles) ? state.terminalProfiles : [];
+  const normalizedShell = normalizeShellKey(shell);
+  if (!normalizedShell) {
+    return null;
+  }
+
+  for (const profile of profiles) {
+    if (normalizeShellKey(profile?.shell) === normalizedShell) {
+      return profile;
+    }
+  }
+
+  const shellBasename = getShellBasename(normalizedShell);
+  for (const profile of profiles) {
+    if (getShellBasename(profile?.shell) === shellBasename) {
+      return profile;
+    }
+  }
+  return null;
+}
+
+function getShellDisplayLabel(shell) {
+  const matchedProfile = getTerminalProfileByShell(shell);
+  if (matchedProfile?.label) {
+    return matchedProfile.label;
+  }
+
+  const basename = getShellBasename(shell);
+  if (!basename) {
+    return "기본 셸";
+  }
+
+  if (/^pwsh(?:\.exe)?$/i.test(basename)) {
+    return "PowerShell 7";
+  }
+  if (/^powershell(?:\.exe)?$/i.test(basename)) {
+    return "Windows PowerShell";
+  }
+  if (/^cmd(?:\.exe)?$/i.test(basename)) {
+    return "Command Prompt";
+  }
+  if (/^wsl(?:\.exe)?$/i.test(basename)) {
+    return "WSL";
+  }
+  return basename;
+}
+
+function syncViewShellPresentation(view) {
+  if (!view) {
+    return;
+  }
+
+  const label = getShellDisplayLabel(view.sessionShell);
+  if (view.shellButton) {
+    view.shellButton.textContent = label;
+    view.shellButton.title = label;
+  }
+  if (view.footerShell) {
+    view.footerShell.textContent = label;
+    view.footerShell.title = label;
+  }
+}
+
+function closeShellMenu(view) {
+  if (!view?.shellMenu) {
+    return;
+  }
+
+  view.shellMenu.classList.remove("is-open");
+  if (view.shellMenuButton) {
+    view.shellMenuButton.setAttribute("aria-expanded", "false");
+  }
+}
+
+function syncShellControls(view) {
+  if (!view) {
+    return;
+  }
+
+  syncViewShellPresentation(view);
+  if (view.shellButton) {
+    setButtonVisibility(view.shellButton, true);
+  }
+  closeShellMenu(view);
+}
+
+function getAttentionPreset(kind) {
+  if (!kind || !Object.prototype.hasOwnProperty.call(ATTENTION_PRESETS, kind)) {
+    return null;
+  }
+  return ATTENTION_PRESETS[kind];
+}
+
+function applyViewAttention(view, attention) {
+  if (!view?.root) {
+    return;
+  }
+
+  for (const preset of Object.values(ATTENTION_PRESETS)) {
+    view.root.classList.remove(preset.className);
+  }
+
+  const preset = getAttentionPreset(attention?.kind);
+  if (preset) {
+    view.root.classList.add(preset.className);
+  }
+
+  if (view.attentionBadge) {
+    if (preset) {
+      view.attentionBadge.textContent = preset.label;
+      view.attentionBadge.classList.add("visible");
+    } else {
+      view.attentionBadge.textContent = "";
+      view.attentionBadge.classList.remove("visible");
+    }
+  }
+
+  if (view.footerAttention) {
+    if (preset) {
+      view.footerAttention.textContent = preset.label;
+      view.footerAttention.classList.add("visible");
+    } else {
+      view.footerAttention.textContent = "";
+      view.footerAttention.classList.remove("visible");
+    }
+  }
+}
+
+function updatePaneAttentionBySessionId(sessionId) {
+  const view = getSessionViewBySessionId(sessionId);
+  if (!view) {
+    return;
+  }
+  applyViewAttention(view, state.attentionBySessionId.get(sessionId) || null);
+}
+
+function setPaneAttention(sessionId, kind, detail = "") {
+  const normalizedSessionId = String(sessionId || "").trim();
+  const preset = getAttentionPreset(kind);
+  if (!normalizedSessionId || !preset) {
+    return;
+  }
+
+  state.attentionBySessionId.set(normalizedSessionId, {
+    kind,
+    detail: String(detail || "").trim(),
+    updatedAt: Date.now(),
+  });
+  updatePaneAttentionBySessionId(normalizedSessionId);
+}
+
+function clearPaneAttention(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+  if (!state.attentionBySessionId.delete(normalizedSessionId)) {
+    return;
+  }
+  updatePaneAttentionBySessionId(normalizedSessionId);
+}
+
+function markExpectedSessionExit(sessionId, reason) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+  state.expectedExitBySessionId.set(normalizedSessionId, {
+    reason: String(reason || "").trim() || "manual",
+    createdAt: Date.now(),
+  });
+}
+
+function consumeExpectedSessionExit(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return null;
+  }
+  const expected = state.expectedExitBySessionId.get(normalizedSessionId) || null;
+  if (expected) {
+    state.expectedExitBySessionId.delete(normalizedSessionId);
+  }
+  return expected;
+}
+
+function clearExpectedSessionExit(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+  state.expectedExitBySessionId.delete(normalizedSessionId);
 }
 
 function normalizeQuestionInlineText(value) {
@@ -474,21 +709,8 @@ function setSkillManagerOverlayVisible(visible) {
   ui.skillManagerOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
 }
 
-function setAgentsPolicyOverlayVisible(visible) {
-  if (!ui.agentsPolicyOverlay) {
-    return;
-  }
-  const shouldShow = Boolean(visible);
-  ui.agentsPolicyOverlay.classList.toggle("visible", shouldShow);
-  ui.agentsPolicyOverlay.setAttribute("aria-hidden", shouldShow ? "false" : "true");
-}
-
 function isSkillManagerOverlayVisible() {
   return Boolean(ui.skillManagerOverlay?.classList.contains("visible"));
-}
-
-function isAgentsPolicyOverlayVisible() {
-  return Boolean(ui.agentsPolicyOverlay?.classList.contains("visible"));
 }
 
 function normalizeSkillName(value) {
@@ -1045,196 +1267,6 @@ function closeSkillManagerDialog() {
   setSkillManagerOverlayVisible(false);
 }
 
-function setAgentsPolicyPathText(pathText = "") {
-  if (!ui.agentsPolicyPath) {
-    return;
-  }
-  const normalizedPath = String(pathText || "").trim();
-  ui.agentsPolicyPath.textContent = `경로: ${normalizedPath || "-"}`;
-}
-
-function hasAgentsPolicyDraftChanges() {
-  const current = String(ui.agentsPolicyEditor?.value || "");
-  return current !== state.agentsPolicyInitialContent;
-}
-
-function syncAgentsPolicyControls() {
-  const isBusy = state.isAgentsPolicyLoading || state.isAgentsPolicySaving;
-  const hasChanges = hasAgentsPolicyDraftChanges();
-
-  if (ui.agentsPolicyEditor) {
-    ui.agentsPolicyEditor.disabled = isBusy;
-  }
-  if (ui.agentsPolicyCancelButton) {
-    ui.agentsPolicyCancelButton.disabled = isBusy;
-  }
-  if (ui.agentsPolicyReloadButton) {
-    ui.agentsPolicyReloadButton.disabled = isBusy;
-  }
-  if (ui.agentsPolicyOpenEditorButton) {
-    ui.agentsPolicyOpenEditorButton.disabled = isBusy;
-  }
-  if (ui.agentsPolicySaveButton) {
-    ui.agentsPolicySaveButton.disabled = isBusy || !hasChanges;
-  }
-}
-
-function shouldDiscardAgentsPolicyDraft() {
-  if (!hasAgentsPolicyDraftChanges()) {
-    return true;
-  }
-  return runtimeWindow.confirm("저장하지 않은 변경사항을 버릴까요?");
-}
-
-async function loadAgentsPolicyIntoEditor(options = {}) {
-  if (!api?.app?.process?.readAgentsPolicy) {
-    setStatusLine("규칙 설정 읽기 기능을 사용할 수 없습니다");
-    return false;
-  }
-
-  const showStatus = options.showStatus !== false;
-  state.isAgentsPolicyLoading = true;
-  syncAgentsPolicyControls();
-  if (showStatus) {
-    setStatusLine("규칙 설정을 불러오는 중...");
-  }
-
-  try {
-    const result = await api.app.process.readAgentsPolicy();
-    if (!result?.ok) {
-      setStatusLine(`규칙 설정 불러오기 실패: ${result?.error || "알 수 없는 오류"}`);
-      return false;
-    }
-
-    const content = typeof result.content === "string" ? result.content : "";
-    state.agentsPolicyInitialContent = content;
-    state.agentsPolicyPath = typeof result.path === "string" ? result.path.trim() : "";
-    state.agentsPolicyLoadedMtimeMs = Number.isFinite(result?.mtimeMs) ? Number(result.mtimeMs) : null;
-
-    if (ui.agentsPolicyEditor) {
-      ui.agentsPolicyEditor.value = content;
-    }
-    setAgentsPolicyPathText(state.agentsPolicyPath);
-    if (showStatus) {
-      setStatusLine("규칙 설정 파일을 불러왔습니다");
-    }
-    return true;
-  } catch (error) {
-    setStatusLine(`규칙 설정 불러오기 실패: ${String(error)}`);
-    return false;
-  } finally {
-    state.isAgentsPolicyLoading = false;
-    syncAgentsPolicyControls();
-  }
-}
-
-async function saveAgentsPolicyEditorContent() {
-  if (!ui.agentsPolicyEditor) {
-    return false;
-  }
-  if (!api?.app?.process?.writeAgentsPolicy) {
-    setStatusLine("규칙 설정 저장 기능을 사용할 수 없습니다");
-    return false;
-  }
-
-  const content = String(ui.agentsPolicyEditor.value || "");
-  if (content === state.agentsPolicyInitialContent) {
-    syncAgentsPolicyControls();
-    return true;
-  }
-
-  state.isAgentsPolicySaving = true;
-  syncAgentsPolicyControls();
-  setStatusLine("규칙 설정 저장 중...");
-
-  try {
-    const payload = { content };
-    if (Number.isFinite(state.agentsPolicyLoadedMtimeMs)) {
-      payload.baseMtimeMs = state.agentsPolicyLoadedMtimeMs;
-    }
-
-    let result = await api.app.process.writeAgentsPolicy(payload);
-    if (result?.ok !== true && result?.error === "stale-version") {
-      if (Number.isFinite(result?.currentMtimeMs)) {
-        state.agentsPolicyLoadedMtimeMs = Number(result.currentMtimeMs);
-      }
-      const shouldOverwrite = runtimeWindow.confirm(
-        "외부에서 AGENTS.md가 변경되었습니다. 현재 편집 내용으로 덮어쓸까요?",
-      );
-      if (!shouldOverwrite) {
-        setStatusLine("외부 변경 감지: 다시불러오기 후 저장하세요");
-        return false;
-      }
-      result = await api.app.process.writeAgentsPolicy({
-        content,
-        ignoreStale: true,
-      });
-    }
-    if (!result?.ok) {
-      setStatusLine(`규칙 설정 저장 실패: ${result?.error || "알 수 없는 오류"}`);
-      return false;
-    }
-
-    state.agentsPolicyInitialContent = content;
-    if (typeof result.path === "string" && result.path.trim().length > 0) {
-      state.agentsPolicyPath = result.path.trim();
-      setAgentsPolicyPathText(state.agentsPolicyPath);
-    }
-    state.agentsPolicyLoadedMtimeMs = Number.isFinite(result?.mtimeMs) ? Number(result.mtimeMs) : null;
-    setStatusLine("규칙 설정을 저장했습니다");
-    return true;
-  } catch (error) {
-    setStatusLine(`규칙 설정 저장 실패: ${String(error)}`);
-    return false;
-  } finally {
-    state.isAgentsPolicySaving = false;
-    syncAgentsPolicyControls();
-  }
-}
-
-async function reloadAgentsPolicyEditorContent() {
-  if (!shouldDiscardAgentsPolicyDraft()) {
-    return false;
-  }
-  return loadAgentsPolicyIntoEditor({ showStatus: true });
-}
-
-function closeAgentsPolicyDialog(options = {}) {
-  if (state.isAgentsPolicyLoading || state.isAgentsPolicySaving) {
-    return;
-  }
-  const force = Boolean(options.force);
-  if (!force && !shouldDiscardAgentsPolicyDraft()) {
-    return;
-  }
-  setAgentsPolicyOverlayVisible(false);
-}
-
-async function openAgentsPolicyInExternalEditor() {
-  if (!api?.app?.process?.editAgentsPolicy) {
-    setStatusLine("외부 편집기 열기 기능을 사용할 수 없습니다");
-    return false;
-  }
-  const result = await api.app.process.editAgentsPolicy();
-  if (!result?.ok) {
-    setStatusLine(`AGENTS.md 파일 편집기 열기 실패: ${result?.error || "알 수 없는 오류"}`);
-    return false;
-  }
-  setStatusLine("AGENTS.md 파일을 시스템 기본 편집기로 열었습니다.");
-  return true;
-}
-
-async function openAgentsPolicyDialog() {
-  if (!ui.agentsPolicyOverlay || !ui.agentsPolicyEditor) {
-    setStatusLine("규칙설정 UI를 열 수 없습니다");
-    return;
-  }
-  setAgentsPolicyOverlayVisible(true);
-  setAgentsPolicyPathText(state.agentsPolicyPath);
-  await loadAgentsPolicyIntoEditor({ showStatus: true });
-  ui.agentsPolicyEditor.focus();
-}
-
 async function runSkillManagerSelection() {
   await refreshSkillManagerCatalog({
     showStatus: true,
@@ -1728,9 +1760,175 @@ function withSessionById(layout) {
   return map;
 }
 
+function getAllowedLayoutVariantsForPanelCount(panelCount) {
+  switch (panelCount) {
+    case 1:
+      return ["single"];
+    case 2:
+      return ["row", "column"];
+    case 3:
+      return ["row", "column", "stack-left", "stack-right", "stack-top", "stack-bottom"];
+    case 4:
+      return ["grid", "row", "column", "stack-left", "stack-right", "stack-top", "stack-bottom"];
+    default:
+      return ["grid"];
+  }
+}
+
+function getAllowedGridShapesForPanelCount(panelCount, fallbackShape) {
+  switch (panelCount) {
+    case 1:
+      return [{ columns: 1, rows: 1 }];
+    case 2:
+      return [
+        { columns: 2, rows: 1 },
+        { columns: 1, rows: 2 },
+      ];
+    case 3:
+      return [
+        { columns: 3, rows: 1 },
+        { columns: 1, rows: 3 },
+        { columns: 2, rows: 2 },
+      ];
+    case 4:
+      return [
+        { columns: 2, rows: 2 },
+        { columns: 4, rows: 1 },
+        { columns: 1, rows: 4 },
+        { columns: 3, rows: 2 },
+        { columns: 2, rows: 3 },
+      ];
+    default:
+      return [
+        {
+          columns: Math.max(1, Math.floor(Number(fallbackShape?.columns) || 1)),
+          rows: Math.max(1, Math.floor(Number(fallbackShape?.rows) || 1)),
+        },
+      ];
+  }
+}
+
+function normalizeGridShapeForPanelCount(gridShape, panelCount, fallbackShape) {
+  const fallback = {
+    columns: Math.max(1, Math.floor(Number(fallbackShape?.columns) || 1)),
+    rows: Math.max(1, Math.floor(Number(fallbackShape?.rows) || 1)),
+  };
+  const allowedShapes = getAllowedGridShapesForPanelCount(panelCount, fallback);
+  if (!gridShape || typeof gridShape !== "object") {
+    return fallback;
+  }
+
+  const columns = Math.max(1, Math.floor(Number(gridShape.columns) || 0));
+  const rows = Math.max(1, Math.floor(Number(gridShape.rows) || 0));
+  const matchedShape = allowedShapes.find(
+    (shape) => shape.columns === columns && shape.rows === rows,
+  );
+  return matchedShape
+    ? { columns: matchedShape.columns, rows: matchedShape.rows }
+    : fallback;
+}
+
+function getGridShapeForLayoutVariant(layoutVariant, panelCount, fallbackShape) {
+  switch (panelCount) {
+    case 1:
+      return { columns: 1, rows: 1 };
+    case 2:
+      return layoutVariant === "column"
+        ? { columns: 1, rows: 2 }
+        : { columns: 2, rows: 1 };
+    case 3:
+      if (layoutVariant === "column") {
+        return { columns: 1, rows: 3 };
+      }
+      if (
+        layoutVariant === "stack-left"
+        || layoutVariant === "stack-right"
+        || layoutVariant === "stack-top"
+        || layoutVariant === "stack-bottom"
+      ) {
+        return { columns: 2, rows: 2 };
+      }
+      return { columns: 3, rows: 1 };
+    case 4:
+      if (layoutVariant === "row") {
+        return { columns: 4, rows: 1 };
+      }
+      if (layoutVariant === "column") {
+        return { columns: 1, rows: 4 };
+      }
+      if (layoutVariant === "stack-left" || layoutVariant === "stack-right") {
+        return { columns: 3, rows: 2 };
+      }
+      if (layoutVariant === "stack-top" || layoutVariant === "stack-bottom") {
+        return { columns: 2, rows: 3 };
+      }
+      return { columns: 2, rows: 2 };
+    default:
+      return {
+        columns: Math.max(1, Math.floor(Number(fallbackShape?.columns) || 1)),
+        rows: Math.max(1, Math.floor(Number(fallbackShape?.rows) || 1)),
+      };
+  }
+}
+
+function normalizeLayoutVariantForPanelCount(layoutVariant, panelCount, gridShape, fallbackShape) {
+  const allowedVariants = getAllowedLayoutVariantsForPanelCount(panelCount);
+  const normalizedVariant = typeof layoutVariant === "string" ? layoutVariant.trim() : "";
+  if (allowedVariants.includes(normalizedVariant)) {
+    return normalizedVariant;
+  }
+
+  const shape = normalizeGridShapeForPanelCount(gridShape, panelCount, fallbackShape);
+  switch (panelCount) {
+    case 1:
+      return "single";
+    case 2:
+      return shape.rows > shape.columns ? "column" : "row";
+    case 3:
+      if (shape.columns === 1 && shape.rows === 3) {
+        return "column";
+      }
+      if (shape.columns === 2 && shape.rows === 2) {
+        return "stack-left";
+      }
+      return "row";
+    case 4:
+      if (shape.columns === 1 && shape.rows === 4) {
+        return "column";
+      }
+      if (shape.columns === 4 && shape.rows === 1) {
+        return "row";
+      }
+      if (shape.columns === 3 && shape.rows === 2) {
+        return "stack-left";
+      }
+      if (shape.columns === 2 && shape.rows === 3) {
+        return "stack-top";
+      }
+      return "grid";
+    default:
+      return allowedVariants[0] || "grid";
+  }
+}
+
 function getPresetConfig(layout, presetId) {
   const presets = layout?.presetSpec?.presets || {};
-  return presets[presetId] || DEFAULT_PRESET_LAYOUTS[presetId] || DEFAULT_PRESET_LAYOUTS["1x2"];
+  const fallback = presets[presetId] || DEFAULT_PRESET_LAYOUTS[presetId] || DEFAULT_PRESET_LAYOUTS["1x2"];
+  const panelCount = Math.max(1, Math.floor(Number(fallback?.panelCount) || 1));
+  const layoutVariant = normalizeLayoutVariantForPanelCount(
+    layout?.layoutVariant,
+    panelCount,
+    layout?.gridShape,
+    fallback,
+  );
+  const resolvedGridShape = getGridShapeForLayoutVariant(layoutVariant, panelCount, fallback);
+  return {
+    ...fallback,
+    panelCount,
+    layoutVariant,
+    columns: resolvedGridShape.columns,
+    rows: resolvedGridShape.rows,
+  };
 }
 
 function getVisiblePanes(layout) {
@@ -1740,13 +1938,524 @@ function getVisiblePanes(layout) {
     .sort((a, b) => (a.positionIndex ?? 0) - (b.positionIndex ?? 0));
 }
 
+function getPanePlacementsForLayoutVariant(layoutVariant, panelCount) {
+  switch (panelCount) {
+    case 1:
+      return [
+        { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+      ];
+    case 2:
+      return layoutVariant === "column"
+        ? [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+          ]
+        : [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+          ];
+    case 3:
+      switch (layoutVariant) {
+        case "column":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+            { columnStart: 1, columnEnd: 2, rowStart: 3, rowEnd: 4 },
+          ];
+        case "stack-left":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 3 },
+          ];
+        case "stack-right":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 3 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 2, rowEnd: 3 },
+          ];
+        case "stack-top":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 3, rowStart: 2, rowEnd: 3 },
+          ];
+        case "stack-bottom":
+          return [
+            { columnStart: 1, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+            { columnStart: 2, columnEnd: 3, rowStart: 2, rowEnd: 3 },
+          ];
+        default:
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 3, columnEnd: 4, rowStart: 1, rowEnd: 2 },
+          ];
+      }
+    case 4:
+      switch (layoutVariant) {
+        case "row":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 3, columnEnd: 4, rowStart: 1, rowEnd: 2 },
+            { columnStart: 4, columnEnd: 5, rowStart: 1, rowEnd: 2 },
+          ];
+        case "column":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+            { columnStart: 1, columnEnd: 2, rowStart: 3, rowEnd: 4 },
+            { columnStart: 1, columnEnd: 2, rowStart: 4, rowEnd: 5 },
+          ];
+        case "stack-left":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 3 },
+            { columnStart: 3, columnEnd: 4, rowStart: 1, rowEnd: 3 },
+          ];
+        case "stack-right":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 3 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 3 },
+            { columnStart: 3, columnEnd: 4, rowStart: 1, rowEnd: 2 },
+            { columnStart: 3, columnEnd: 4, rowStart: 2, rowEnd: 3 },
+          ];
+        case "stack-top":
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 3, rowStart: 2, rowEnd: 3 },
+            { columnStart: 1, columnEnd: 3, rowStart: 3, rowEnd: 4 },
+          ];
+        case "stack-bottom":
+          return [
+            { columnStart: 1, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 3, rowStart: 2, rowEnd: 3 },
+            { columnStart: 1, columnEnd: 2, rowStart: 3, rowEnd: 4 },
+            { columnStart: 2, columnEnd: 3, rowStart: 3, rowEnd: 4 },
+          ];
+        default:
+          return [
+            { columnStart: 1, columnEnd: 2, rowStart: 1, rowEnd: 2 },
+            { columnStart: 2, columnEnd: 3, rowStart: 1, rowEnd: 2 },
+            { columnStart: 1, columnEnd: 2, rowStart: 2, rowEnd: 3 },
+            { columnStart: 2, columnEnd: 3, rowStart: 2, rowEnd: 3 },
+          ];
+      }
+    default:
+      return Array.from({ length: panelCount }, (_, index) => ({
+        columnStart: index + 1,
+        columnEnd: index + 2,
+        rowStart: 1,
+        rowEnd: 2,
+      }));
+  }
+}
+
+function getNormalizedPaneRect(placement, gridShape) {
+  const columns = Math.max(1, Math.floor(Number(gridShape?.columns) || 1));
+  const rows = Math.max(1, Math.floor(Number(gridShape?.rows) || 1));
+  return {
+    left: (placement.columnStart - 1) / columns,
+    right: (placement.columnEnd - 1) / columns,
+    top: (placement.rowStart - 1) / rows,
+    bottom: (placement.rowEnd - 1) / rows,
+  };
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  return Math.min(endA, endB) > Math.max(startA, startB);
+}
+
+function areStringArraysEqual(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((value, index) => value === right[index]);
+}
+
+function isPlacementAdjacentOnEdge(sourcePlacement, targetPlacement, targetEdge) {
+  if (!sourcePlacement || !targetPlacement || !targetEdge) {
+    return false;
+  }
+
+  switch (targetEdge) {
+    case "left":
+      return sourcePlacement.columnEnd === targetPlacement.columnStart
+        && rangesOverlap(
+          sourcePlacement.rowStart,
+          sourcePlacement.rowEnd,
+          targetPlacement.rowStart,
+          targetPlacement.rowEnd,
+        );
+    case "right":
+      return sourcePlacement.columnStart === targetPlacement.columnEnd
+        && rangesOverlap(
+          sourcePlacement.rowStart,
+          sourcePlacement.rowEnd,
+          targetPlacement.rowStart,
+          targetPlacement.rowEnd,
+        );
+    case "top":
+      return sourcePlacement.rowEnd === targetPlacement.rowStart
+        && rangesOverlap(
+          sourcePlacement.columnStart,
+          sourcePlacement.columnEnd,
+          targetPlacement.columnStart,
+          targetPlacement.columnEnd,
+        );
+    case "bottom":
+      return sourcePlacement.rowStart === targetPlacement.rowEnd
+        && rangesOverlap(
+          sourcePlacement.columnStart,
+          sourcePlacement.columnEnd,
+          targetPlacement.columnStart,
+          targetPlacement.columnEnd,
+        );
+    default:
+      return false;
+  }
+}
+
+function isHorizontalPaneSwapEdge(targetEdge) {
+  return targetEdge === "left" || targetEdge === "right";
+}
+
+function isVerticalPaneSwapEdge(targetEdge) {
+  return targetEdge === "top" || targetEdge === "bottom";
+}
+
+function dedupeLayoutVariants(layoutVariants, allowedVariants) {
+  const safeAllowedVariants = Array.isArray(allowedVariants) ? allowedVariants : [];
+  const safeLayoutVariants = Array.isArray(layoutVariants) ? layoutVariants : [];
+  return safeLayoutVariants.filter((layoutVariant, index) =>
+    safeAllowedVariants.includes(layoutVariant) && safeLayoutVariants.indexOf(layoutVariant) === index);
+}
+
+function getPreferredFourPaneLayoutVariants(layoutSnapshot, sourcePaneId, targetPaneId, targetEdge) {
+  const presetId = String(layoutSnapshot?.presetId || "").trim();
+  if (!presetId || !sourcePaneId || !targetPaneId || sourcePaneId === targetPaneId || !targetEdge) {
+    return [];
+  }
+
+  const preset = getPresetConfig(layoutSnapshot, presetId);
+  const paneIds = getVisiblePanes(layoutSnapshot).map((pane) => pane.id);
+  if (paneIds.length !== 4) {
+    return [];
+  }
+
+  if (!paneIds.includes(sourcePaneId) || !paneIds.includes(targetPaneId)) {
+    return [];
+  }
+
+  const isHorizontal = isHorizontalPaneSwapEdge(targetEdge);
+  const isVertical = isVerticalPaneSwapEdge(targetEdge);
+  if (!isHorizontal && !isVertical) {
+    return [];
+  }
+
+  const currentState = buildCandidateLayoutState(
+    paneIds,
+    preset.layoutVariant,
+    paneIds.length,
+    preset,
+  );
+  const targetRect = currentState?.paneRects.get(targetPaneId);
+  const targetCenterX = targetRect ? (targetRect.left + targetRect.right) / 2 : 0.5;
+  const targetCenterY = targetRect ? (targetRect.top + targetRect.bottom) / 2 : 0.5;
+  const allowedVariants = getAllowedLayoutVariantsForPanelCount(4);
+
+  if (preset.layoutVariant === "row") {
+    return isHorizontal
+      ? dedupeLayoutVariants(
+        ["row", targetCenterX <= 0.5 ? "stack-right" : "stack-left", "grid", "column"],
+        allowedVariants,
+      )
+      : dedupeLayoutVariants(
+        [targetCenterY <= 0.5 ? "stack-bottom" : "stack-top", "grid", "column", "row"],
+        allowedVariants,
+      );
+  }
+
+  if (preset.layoutVariant === "column") {
+    return isVertical
+      ? dedupeLayoutVariants(
+        ["column", targetCenterY <= 0.5 ? "stack-bottom" : "stack-top", "grid", "row"],
+        allowedVariants,
+      )
+      : dedupeLayoutVariants(
+        [targetCenterX <= 0.5 ? "stack-right" : "stack-left", "grid", "row", "column"],
+        allowedVariants,
+      );
+  }
+
+  if (preset.layoutVariant === "stack-left" || preset.layoutVariant === "stack-right") {
+    return isHorizontal
+      ? dedupeLayoutVariants(
+        [preset.layoutVariant, targetCenterX <= 0.5 ? "stack-right" : "stack-left", "grid", "row", "column"],
+        allowedVariants,
+      )
+      : dedupeLayoutVariants(
+        [targetCenterY <= 0.5 ? "stack-bottom" : "stack-top", "grid", "column", preset.layoutVariant, "row"],
+        allowedVariants,
+      );
+  }
+
+  if (preset.layoutVariant === "stack-top" || preset.layoutVariant === "stack-bottom") {
+    return isVertical
+      ? dedupeLayoutVariants(
+        [preset.layoutVariant, targetCenterY <= 0.5 ? "stack-bottom" : "stack-top", "grid", "column", "row"],
+        allowedVariants,
+      )
+      : dedupeLayoutVariants(
+        [targetCenterX <= 0.5 ? "stack-right" : "stack-left", "grid", "row", preset.layoutVariant, "column"],
+        allowedVariants,
+      );
+  }
+
+  return isHorizontal
+    ? dedupeLayoutVariants(
+      [targetCenterX <= 0.5 ? "stack-right" : "stack-left", "grid", "row", "column", "stack-top", "stack-bottom"],
+      allowedVariants,
+    )
+    : dedupeLayoutVariants(
+      [targetCenterY <= 0.5 ? "stack-bottom" : "stack-top", "grid", "column", "row", "stack-left", "stack-right"],
+      allowedVariants,
+    );
+}
+
+function buildCandidateLayoutState(orderIds, layoutVariant, panelCount, fallbackShape) {
+  const gridShape = getGridShapeForLayoutVariant(layoutVariant, panelCount, fallbackShape);
+  const placements = getPanePlacementsForLayoutVariant(layoutVariant, panelCount);
+  if (!Array.isArray(placements) || placements.length !== orderIds.length) {
+    return null;
+  }
+
+  const paneRects = new Map();
+  orderIds.forEach((paneId, index) => {
+    paneRects.set(paneId, getNormalizedPaneRect(placements[index], gridShape));
+  });
+
+  return {
+    orderIds: [...orderIds],
+    layoutVariant,
+    gridShape,
+    placements,
+    paneRects,
+    signature: `${layoutVariant}:${orderIds.join(",")}`,
+  };
+}
+
+function permutePaneOrders(paneIds) {
+  if (paneIds.length <= 1) {
+    return [paneIds.slice()];
+  }
+
+  const permutations = [];
+  paneIds.forEach((paneId, index) => {
+    const remaining = [...paneIds.slice(0, index), ...paneIds.slice(index + 1)];
+    permutePaneOrders(remaining).forEach((tail) => {
+      permutations.push([paneId, ...tail]);
+    });
+  });
+  return permutations;
+}
+
+function getLayoutStateTransitionScore(currentState, candidateState, sourcePaneId, targetPaneId) {
+  let score = 0;
+
+  currentState.orderIds.forEach((paneId) => {
+    const currentRect = currentState.paneRects.get(paneId);
+    const candidateRect = candidateState.paneRects.get(paneId);
+    if (!currentRect || !candidateRect) {
+      score += 10;
+      return;
+    }
+
+    const currentCenterX = (currentRect.left + currentRect.right) / 2;
+    const currentCenterY = (currentRect.top + currentRect.bottom) / 2;
+    const candidateCenterX = (candidateRect.left + candidateRect.right) / 2;
+    const candidateCenterY = (candidateRect.top + candidateRect.bottom) / 2;
+    const currentWidth = currentRect.right - currentRect.left;
+    const currentHeight = currentRect.bottom - currentRect.top;
+    const candidateWidth = candidateRect.right - candidateRect.left;
+    const candidateHeight = candidateRect.bottom - candidateRect.top;
+
+    const weight = paneId === sourcePaneId ? 1 : paneId === targetPaneId ? 1.2 : 1.6;
+    score += weight * (
+      Math.abs(currentCenterX - candidateCenterX)
+      + Math.abs(currentCenterY - candidateCenterY)
+      + (Math.abs(currentWidth - candidateWidth) * 0.35)
+      + (Math.abs(currentHeight - candidateHeight) * 0.35)
+    );
+  });
+
+  if (currentState.layoutVariant !== candidateState.layoutVariant) {
+    score += 0.05;
+  }
+
+  return score;
+}
+
+function getPreferredLayoutVariantsForPaneSwap(layoutSnapshot, sourcePaneId, targetPaneId, targetEdge) {
+  const presetId = String(layoutSnapshot?.presetId || "").trim();
+  const panelCount = getVisiblePanes(layoutSnapshot).length;
+  if (panelCount <= 1) {
+    return [];
+  }
+
+  if (panelCount === 2) {
+    return [targetEdge === "top" || targetEdge === "bottom" ? "column" : "row"];
+  }
+
+  if (panelCount === 3) {
+    const preset = getPresetConfig(layoutSnapshot, presetId);
+    const visiblePanes = getVisiblePanes(layoutSnapshot);
+    const sourceIndex = visiblePanes.findIndex((pane) => pane?.id === sourcePaneId);
+    const targetIndex = visiblePanes.findIndex((pane) => pane?.id === targetPaneId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return [targetEdge === "top" || targetEdge === "bottom" ? "column" : "row"];
+    }
+
+    if (
+      (targetEdge === "top" || targetEdge === "bottom")
+      && preset.layoutVariant === "row"
+      && targetIndex === 1
+    ) {
+      return [sourceIndex < targetIndex ? "stack-left" : "stack-right", "column"];
+    }
+
+    if (
+      (targetEdge === "left" || targetEdge === "right")
+      && preset.layoutVariant === "column"
+      && targetIndex === 1
+    ) {
+      return [sourceIndex < targetIndex ? "stack-top" : "stack-bottom", "row"];
+    }
+
+    return [targetEdge === "top" || targetEdge === "bottom" ? "column" : "row"];
+  }
+
+  if (panelCount === 4) {
+    return getPreferredFourPaneLayoutVariants(
+      layoutSnapshot,
+      sourcePaneId,
+      targetPaneId,
+      targetEdge,
+    );
+  }
+
+  return [];
+}
+
+function chooseNextPaneLayoutState(
+  layoutSnapshot,
+  sourcePaneId,
+  targetPaneId,
+  targetEdge,
+  preferredLayoutVariants = [],
+) {
+  const presetId = String(layoutSnapshot?.presetId || "").trim();
+  if (!presetId || !sourcePaneId || !targetPaneId || sourcePaneId === targetPaneId || !targetEdge) {
+    return null;
+  }
+
+  const preset = getPresetConfig(layoutSnapshot, presetId);
+  const visiblePanes = getVisiblePanes(layoutSnapshot);
+  const paneIds = visiblePanes.map((pane) => pane.id);
+  if (!paneIds.includes(sourcePaneId) || !paneIds.includes(targetPaneId)) {
+    return null;
+  }
+
+  const currentState = buildCandidateLayoutState(
+    paneIds,
+    preset.layoutVariant,
+    paneIds.length,
+    preset,
+  );
+  if (!currentState) {
+    return null;
+  }
+
+  const orderCandidates = permutePaneOrders(paneIds);
+  const allLayoutVariants = getAllowedLayoutVariantsForPanelCount(paneIds.length);
+  const normalizedPreferredVariants = dedupeLayoutVariants(preferredLayoutVariants, allLayoutVariants);
+  const fallbackVariants = allLayoutVariants.filter(
+    (layoutVariant) => !normalizedPreferredVariants.includes(layoutVariant),
+  );
+  const variantPasses = [];
+  if (normalizedPreferredVariants.length > 0) {
+    variantPasses.push(normalizedPreferredVariants);
+  }
+  if (fallbackVariants.length > 0) {
+    variantPasses.push(fallbackVariants);
+  }
+
+  for (const layoutVariants of variantPasses) {
+    let bestCandidate = null;
+
+    orderCandidates.forEach((orderIds) => {
+      layoutVariants.forEach((layoutVariant) => {
+        const candidateState = buildCandidateLayoutState(orderIds, layoutVariant, paneIds.length, preset);
+        if (!candidateState) {
+          return;
+        }
+
+        const sourceIndex = orderIds.indexOf(sourcePaneId);
+        const targetIndex = orderIds.indexOf(targetPaneId);
+        if (
+          sourceIndex < 0
+          || targetIndex < 0
+          || !isPlacementAdjacentOnEdge(
+            candidateState.placements[sourceIndex],
+            candidateState.placements[targetIndex],
+            targetEdge,
+          )
+        ) {
+          return;
+        }
+
+        const score = getLayoutStateTransitionScore(
+          currentState,
+          candidateState,
+          sourcePaneId,
+          targetPaneId,
+        );
+        const candidate = {
+          ...candidateState,
+          score,
+        };
+
+        if (
+          !bestCandidate
+          || candidate.score < bestCandidate.score - 0.0001
+          || (
+            Math.abs(candidate.score - bestCandidate.score) <= 0.0001
+            && candidate.signature < bestCandidate.signature
+          )
+        ) {
+          bestCandidate = candidate;
+        }
+      });
+    });
+
+    if (bestCandidate) {
+      return bestCandidate;
+    }
+  }
+
+  return null;
+}
+
 const GRID_PRESET_CLASS_NAMES = Object.freeze([
   "preset-1x1",
   "preset-1x2",
+  "preset-1x3",
   "preset-1x4",
-  "preset-2x6",
-  "preset-2x8",
-
 ]);
 
 function applyGridPreset(presetId) {
@@ -1754,6 +2463,889 @@ function applyGridPreset(presetId) {
   if (typeof presetId === "string" && presetId.length > 0) {
     ui.grid.classList.add(`preset-${presetId}`);
   }
+}
+
+function normalizeTrackSizes(trackSizes, expectedLength) {
+  if (!Array.isArray(trackSizes) || trackSizes.length !== expectedLength) {
+    return null;
+  }
+
+  const safe = trackSizes
+    .map((value) => Number(value))
+    .map((value) => (Number.isFinite(value) && value > 0 ? value : 0));
+  const total = safe.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) {
+    return null;
+  }
+
+  return safe.map((value) => (value / total) * 100);
+}
+
+function getEqualTrackSizes(trackCount) {
+  if (!Number.isFinite(trackCount) || trackCount <= 0) {
+    return [];
+  }
+  return Array.from({ length: trackCount }, () => 100 / trackCount);
+}
+
+function cloneGridTracks(gridTracks) {
+  if (!gridTracks || typeof gridTracks !== "object") {
+    return null;
+  }
+
+  return {
+    columns: Array.isArray(gridTracks.columns) ? [...gridTracks.columns] : [],
+    rows: Array.isArray(gridTracks.rows) ? [...gridTracks.rows] : [],
+  };
+}
+
+function cloneLayoutPanes(panes) {
+  if (!Array.isArray(panes)) {
+    return [];
+  }
+
+  return panes.map((pane) => ({
+    id: typeof pane?.id === "string" ? pane.id : "",
+    slotIndex: Number.isFinite(Number(pane?.slotIndex))
+      ? Math.max(0, Math.floor(Number(pane.slotIndex)))
+      : 0,
+    positionIndex: Number.isFinite(Number(pane?.positionIndex))
+      ? Math.max(0, Math.floor(Number(pane.positionIndex)))
+      : 0,
+    groupId: typeof pane?.groupId === "string" ? pane.groupId : "",
+    state:
+      pane?.state === "visible" || pane?.state === "hidden" || pane?.state === "terminated"
+        ? pane.state
+        : "hidden",
+    sessionId:
+      typeof pane?.sessionId === "string" && pane.sessionId.length > 0
+        ? pane.sessionId
+        : null,
+  }));
+}
+
+function getGroupIdByPositionIndexForGridShape(positionIndex, gridShape) {
+  const columns = Math.max(1, Math.floor(Number(gridShape?.columns) || 1));
+  const row = Math.floor(Math.max(0, Math.floor(Number(positionIndex) || 0)) / columns);
+  return `row-${row + 1}`;
+}
+
+function buildLayoutSavePayload(layoutSnapshot, options = {}) {
+  if (!layoutSnapshot?.presetId) {
+    return null;
+  }
+
+  const preset = getPresetConfig(layoutSnapshot, layoutSnapshot.presetId);
+
+  const payload = {
+    presetId: layoutSnapshot.presetId,
+    layoutVariant: preset.layoutVariant,
+    gridShape: {
+      columns: preset.columns,
+      rows: preset.rows,
+    },
+    gridTracks: cloneGridTracks(layoutSnapshot.gridTracks),
+  };
+
+  if (options.includePanes) {
+    payload.panes = cloneLayoutPanes(layoutSnapshot.panes);
+  }
+
+  return payload;
+}
+
+function getLayoutConstraints(layout) {
+  const rawConstraints = layout?.presetSpec?.constraints || {};
+  const minPanelWidthPx = Number(rawConstraints.minPanelWidthPx);
+  const minPanelHeightPx = Number(rawConstraints.minPanelHeightPx);
+  const splitterSizePx = Number(rawConstraints.splitterSizePx);
+  const splitterHitAreaPx = Number(rawConstraints.splitterHitAreaPx);
+
+  return {
+    minPanelWidthPx:
+      Number.isFinite(minPanelWidthPx) && minPanelWidthPx > 0
+        ? minPanelWidthPx
+        : DEFAULT_LAYOUT_CONSTRAINTS.minPanelWidthPx,
+    minPanelHeightPx:
+      Number.isFinite(minPanelHeightPx) && minPanelHeightPx > 0
+        ? minPanelHeightPx
+        : DEFAULT_LAYOUT_CONSTRAINTS.minPanelHeightPx,
+    splitterSizePx:
+      Number.isFinite(splitterSizePx) && splitterSizePx > 0
+        ? splitterSizePx
+        : DEFAULT_LAYOUT_CONSTRAINTS.splitterSizePx,
+    splitterHitAreaPx:
+      Number.isFinite(splitterHitAreaPx) && splitterHitAreaPx > 0
+        ? splitterHitAreaPx
+        : DEFAULT_LAYOUT_CONSTRAINTS.splitterHitAreaPx,
+  };
+}
+
+function getEffectiveGridTracks(layout, preset) {
+  const columnCount = Math.max(1, Math.floor(Number(preset?.columns) || 1));
+  const rowCount = Math.max(1, Math.floor(Number(preset?.rows) || 1));
+  const savedColumns = normalizeTrackSizes(layout?.gridTracks?.columns, columnCount);
+  const savedRows = normalizeTrackSizes(layout?.gridTracks?.rows, rowCount);
+
+  return {
+    columns: savedColumns || getEqualTrackSizes(columnCount),
+    rows: savedRows || getEqualTrackSizes(rowCount),
+  };
+}
+
+function applyGridTracks(layout, preset) {
+  if (!ui.grid || !preset) {
+    return;
+  }
+
+  const tracks = getEffectiveGridTracks(layout, preset);
+  const constraints = getLayoutConstraints(layout);
+  ui.grid.style.gridTemplateColumns = tracks.columns
+    .map((value) => `minmax(0, ${value}fr)`)
+    .join(" ");
+  ui.grid.style.gridTemplateRows = tracks.rows
+    .map((value) => `minmax(0, ${value}fr)`)
+    .join(" ");
+  ui.grid.style.setProperty("--pane-splitter-size", `${constraints.splitterSizePx}px`);
+  ui.grid.style.setProperty("--pane-splitter-hit-area", `${constraints.splitterHitAreaPx}px`);
+}
+
+function getGridGapPx(axis) {
+  if (!ui.grid) {
+    return 0;
+  }
+  const styles = window.getComputedStyle(ui.grid);
+  const rawValue = axis === "columns"
+    ? styles.columnGap || styles.gap
+    : styles.rowGap || styles.gap;
+  const parsed = Number.parseFloat(rawValue);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function buildTrackPixelSizes(containerSizePx, trackSizes, gapPx) {
+  const safeTracks = Array.isArray(trackSizes) ? trackSizes : [];
+  if (safeTracks.length === 0) {
+    return [];
+  }
+
+  const safeGapPx = Number.isFinite(gapPx) && gapPx > 0 ? gapPx : 0;
+  const totalGapPx = safeGapPx * Math.max(0, safeTracks.length - 1);
+  const availableTrackSpacePx = Math.max(0, containerSizePx - totalGapPx);
+  const normalized = normalizeTrackSizes(safeTracks, safeTracks.length) || getEqualTrackSizes(safeTracks.length);
+  const totalWeight = normalized.reduce((sum, value) => sum + value, 0) || safeTracks.length;
+  return normalized.map((value) => availableTrackSpacePx * (value / totalWeight));
+}
+
+function getBoundaryCenterPx(trackPixelSizes, leadingTrackIndex, gapPx) {
+  let offsetPx = 0;
+  for (let index = 0; index <= leadingTrackIndex; index += 1) {
+    offsetPx += trackPixelSizes[index] || 0;
+    if (index < leadingTrackIndex) {
+      offsetPx += gapPx;
+    }
+  }
+  return offsetPx + (gapPx / 2);
+}
+
+function getTrackSegmentStartPx(trackPixelSizes, gapPx, startTrackIndex) {
+  let offsetPx = 0;
+  for (let index = 0; index < startTrackIndex; index += 1) {
+    offsetPx += trackPixelSizes[index] || 0;
+    offsetPx += gapPx;
+  }
+  return offsetPx;
+}
+
+function getTrackSegmentSizePx(trackPixelSizes, gapPx, startTrackIndex, endTrackIndex) {
+  if (endTrackIndex <= startTrackIndex) {
+    return 0;
+  }
+
+  let sizePx = 0;
+  for (let index = startTrackIndex; index < endTrackIndex; index += 1) {
+    sizePx += trackPixelSizes[index] || 0;
+    if (index < endTrackIndex - 1) {
+      sizePx += gapPx;
+    }
+  }
+  return sizePx;
+}
+
+function mergeGridSplitterSegments(segments) {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return [];
+  }
+
+  const sorted = [...segments].sort((a, b) => {
+    if (a.axis !== b.axis) {
+      return a.axis.localeCompare(b.axis);
+    }
+    if (a.trackIndex !== b.trackIndex) {
+      return a.trackIndex - b.trackIndex;
+    }
+    if (a.segmentStart !== b.segmentStart) {
+      return a.segmentStart - b.segmentStart;
+    }
+    return a.segmentEnd - b.segmentEnd;
+  });
+
+  const merged = [];
+  sorted.forEach((segment) => {
+    const previous = merged[merged.length - 1];
+    if (
+      previous
+      && previous.axis === segment.axis
+      && previous.trackIndex === segment.trackIndex
+      && previous.segmentEnd >= segment.segmentStart
+    ) {
+      previous.segmentEnd = Math.max(previous.segmentEnd, segment.segmentEnd);
+      return;
+    }
+
+    merged.push({ ...segment });
+  });
+  return merged;
+}
+
+function buildGridSplitterSegments(layout, preset) {
+  const visiblePanes = getVisiblePanes(layout);
+  const placements = getPanePlacementsForLayoutVariant(preset.layoutVariant, visiblePanes.length);
+  const segments = [];
+
+  for (let leftIndex = 0; leftIndex < placements.length; leftIndex += 1) {
+    const leftPlacement = placements[leftIndex];
+    if (!leftPlacement) {
+      continue;
+    }
+
+    for (let rightIndex = leftIndex + 1; rightIndex < placements.length; rightIndex += 1) {
+      const rightPlacement = placements[rightIndex];
+      if (!rightPlacement) {
+        continue;
+      }
+
+      if (
+        leftPlacement.columnEnd === rightPlacement.columnStart
+        || rightPlacement.columnEnd === leftPlacement.columnStart
+      ) {
+        const sourcePlacement = leftPlacement.columnEnd === rightPlacement.columnStart
+          ? leftPlacement
+          : rightPlacement;
+        const targetPlacement = sourcePlacement === leftPlacement ? rightPlacement : leftPlacement;
+        const segmentStart = Math.max(sourcePlacement.rowStart, targetPlacement.rowStart) - 1;
+        const segmentEnd = Math.min(sourcePlacement.rowEnd, targetPlacement.rowEnd) - 1;
+        if (segmentEnd > segmentStart) {
+          segments.push({
+            axis: "columns",
+            trackIndex: sourcePlacement.columnEnd - 2,
+            segmentStart,
+            segmentEnd,
+          });
+        }
+      }
+
+      if (
+        leftPlacement.rowEnd === rightPlacement.rowStart
+        || rightPlacement.rowEnd === leftPlacement.rowStart
+      ) {
+        const sourcePlacement = leftPlacement.rowEnd === rightPlacement.rowStart
+          ? leftPlacement
+          : rightPlacement;
+        const targetPlacement = sourcePlacement === leftPlacement ? rightPlacement : leftPlacement;
+        const segmentStart = Math.max(sourcePlacement.columnStart, targetPlacement.columnStart) - 1;
+        const segmentEnd = Math.min(sourcePlacement.columnEnd, targetPlacement.columnEnd) - 1;
+        if (segmentEnd > segmentStart) {
+          segments.push({
+            axis: "rows",
+            trackIndex: sourcePlacement.rowEnd - 2,
+            segmentStart,
+            segmentEnd,
+          });
+        }
+      }
+    }
+  }
+
+  return mergeGridSplitterSegments(segments);
+}
+
+function clearGridSplitters() {
+  if (!ui.grid) {
+    return;
+  }
+  ui.grid.querySelectorAll(GRID_SPLITTER_SELECTOR).forEach((splitter) => splitter.remove());
+}
+
+function syncGridSplittersLayout() {
+  if (!ui.grid || !state.layout) {
+    return;
+  }
+
+  const preset = getPresetConfig(state.layout, state.layout.presetId);
+  const tracks = getEffectiveGridTracks(state.layout, preset);
+  const columnGapPx = getGridGapPx("columns");
+  const rowGapPx = getGridGapPx("rows");
+  const columnTrackSizesPx = buildTrackPixelSizes(ui.grid.clientWidth, tracks.columns, columnGapPx);
+  const rowTrackSizesPx = buildTrackPixelSizes(ui.grid.clientHeight, tracks.rows, rowGapPx);
+
+  ui.grid.querySelectorAll(GRID_SPLITTER_SELECTOR).forEach((splitter) => {
+    const axis = splitter instanceof HTMLElement ? splitter.dataset.axis : "";
+    const trackIndex = splitter instanceof HTMLElement
+      ? Number.parseInt(splitter.dataset.trackIndex || "", 10)
+      : Number.NaN;
+    if (!Number.isFinite(trackIndex) || trackIndex < 0) {
+      return;
+    }
+
+    if (axis === "columns") {
+      const leftPx = getBoundaryCenterPx(columnTrackSizesPx, trackIndex, columnGapPx);
+      const segmentStart = splitter instanceof HTMLElement
+        ? Number.parseInt(splitter.dataset.segmentStart || "", 10)
+        : Number.NaN;
+      const segmentEnd = splitter instanceof HTMLElement
+        ? Number.parseInt(splitter.dataset.segmentEnd || "", 10)
+        : Number.NaN;
+      const safeSegmentStart = Number.isFinite(segmentStart) ? segmentStart : 0;
+      const safeSegmentEnd = Number.isFinite(segmentEnd) ? segmentEnd : rowTrackSizesPx.length;
+      const topPx = getTrackSegmentStartPx(rowTrackSizesPx, rowGapPx, safeSegmentStart);
+      const heightPx = getTrackSegmentSizePx(rowTrackSizesPx, rowGapPx, safeSegmentStart, safeSegmentEnd);
+      splitter.style.left = `${leftPx}px`;
+      splitter.style.top = `${topPx}px`;
+      splitter.style.height = `${heightPx}px`;
+    } else if (axis === "rows") {
+      const topPx = getBoundaryCenterPx(rowTrackSizesPx, trackIndex, rowGapPx);
+      const segmentStart = splitter instanceof HTMLElement
+        ? Number.parseInt(splitter.dataset.segmentStart || "", 10)
+        : Number.NaN;
+      const segmentEnd = splitter instanceof HTMLElement
+        ? Number.parseInt(splitter.dataset.segmentEnd || "", 10)
+        : Number.NaN;
+      const safeSegmentStart = Number.isFinite(segmentStart) ? segmentStart : 0;
+      const safeSegmentEnd = Number.isFinite(segmentEnd) ? segmentEnd : columnTrackSizesPx.length;
+      const leftPx = getTrackSegmentStartPx(columnTrackSizesPx, columnGapPx, safeSegmentStart);
+      const widthPx = getTrackSegmentSizePx(columnTrackSizesPx, columnGapPx, safeSegmentStart, safeSegmentEnd);
+      splitter.style.top = `${topPx}px`;
+      splitter.style.left = `${leftPx}px`;
+      splitter.style.width = `${widthPx}px`;
+    }
+  });
+}
+
+function setGridResizeCursor(axis) {
+  document.body.classList.add("is-grid-resizing");
+  document.body.classList.remove("is-grid-resizing-columns", "is-grid-resizing-rows");
+  document.body.classList.add(axis === "columns" ? "is-grid-resizing-columns" : "is-grid-resizing-rows");
+  ui.grid?.classList.add("is-resizing");
+}
+
+function clearGridResizeCursor() {
+  document.body.classList.remove("is-grid-resizing", "is-grid-resizing-columns", "is-grid-resizing-rows");
+  ui.grid?.classList.remove("is-resizing");
+}
+
+async function persistGridTracks() {
+  if (!api?.layout?.save) {
+    return null;
+  }
+
+  try {
+    const payload = buildLayoutSavePayload(state.layout);
+    if (!payload) {
+      return null;
+    }
+    return await api.layout.save(payload);
+  } catch (error) {
+    setStatusLine(`layout save failed: ${String(error)}`);
+    return null;
+  }
+}
+
+async function persistActiveLayoutSnapshot(layoutSnapshot = state.layout) {
+  if (!api?.layout?.save) {
+    return null;
+  }
+
+  try {
+    const payload = buildLayoutSavePayload(layoutSnapshot, { includePanes: true });
+    if (!payload) {
+      return null;
+    }
+    return await api.layout.save(payload);
+  } catch (error) {
+    setStatusLine(`layout save failed: ${String(error)}`);
+    return null;
+  }
+}
+
+function applyNextGridTracks(nextGridTracks, preset) {
+  if (!state.layout) {
+    return;
+  }
+  state.layout.gridTracks = cloneGridTracks(nextGridTracks);
+  applyGridTracks(state.layout, preset);
+  syncGridSplittersLayout();
+}
+
+function updateActiveGridResize(clientCoordinatePx) {
+  const drag = state.activeGridResize;
+  if (!drag || !state.layout) {
+    return;
+  }
+
+  const deltaPx = clientCoordinatePx - drag.startClientCoordinatePx;
+  const maxPrimaryPx = Math.max(drag.minTrackSizePx, drag.pairTotalPx - drag.minTrackSizePx);
+  const minPrimaryPx = Math.min(drag.minTrackSizePx, maxPrimaryPx);
+  const nextPrimaryPx = Math.min(
+    maxPrimaryPx,
+    Math.max(minPrimaryPx, drag.startPrimaryTrackSizePx + deltaPx),
+  );
+  const currentPrimaryPx = drag.trackPixelSizes[drag.trackIndex] || 0;
+  if (Math.abs(nextPrimaryPx - currentPrimaryPx) < 0.5) {
+    return;
+  }
+
+  const nextTrackPixelSizes = [...drag.trackPixelSizes];
+  nextTrackPixelSizes[drag.trackIndex] = nextPrimaryPx;
+  nextTrackPixelSizes[drag.trackIndex + 1] = Math.max(0, drag.pairTotalPx - nextPrimaryPx);
+  const nextAxisTracks = normalizeTrackSizes(nextTrackPixelSizes, nextTrackPixelSizes.length);
+  if (!nextAxisTracks) {
+    return;
+  }
+
+  drag.didChange = true;
+  if (drag.axis === "columns") {
+    applyNextGridTracks(
+      {
+        columns: nextAxisTracks,
+        rows: [...drag.otherAxisTracks],
+      },
+      drag.preset,
+    );
+    return;
+  }
+
+  applyNextGridTracks(
+    {
+      columns: [...drag.otherAxisTracks],
+      rows: nextAxisTracks,
+    },
+    drag.preset,
+  );
+}
+
+function stopGridResize(options = {}) {
+  const { persist = true } = options;
+  const drag = state.activeGridResize;
+  if (!drag) {
+    clearGridResizeCursor();
+    return;
+  }
+
+  window.removeEventListener("pointermove", drag.handlePointerMove, true);
+  window.removeEventListener("pointerup", drag.handlePointerUp, true);
+  window.removeEventListener("pointercancel", drag.handlePointerCancel, true);
+  window.removeEventListener("blur", drag.handlePointerCancel);
+  drag.handleElement?.classList.remove("is-active");
+  clearGridResizeCursor();
+  state.activeGridResize = null;
+
+  if (persist && drag.didChange) {
+    void persistGridTracks();
+  }
+}
+
+function syncPaneSwapVisualState() {
+  const drag = state.activePaneSwap;
+  const isDragging = Boolean(drag?.isDragging);
+  const sourcePaneId = isDragging ? drag?.sourcePaneId || "" : "";
+  const targetPaneId = isDragging ? drag?.targetPaneId || "" : "";
+  const targetEdge = isDragging ? drag?.targetEdge || "" : "";
+
+  document.body.classList.toggle("is-pane-swapping", isDragging);
+
+  for (const view of state.paneViews.values()) {
+    if (!view?.root || !view?.paneId) {
+      continue;
+    }
+    view.root.classList.toggle("is-swap-source", view.paneId === sourcePaneId);
+    view.root.classList.toggle("is-swap-target", view.paneId === targetPaneId);
+    if (view.paneId === targetPaneId && targetEdge) {
+      view.root.dataset.swapDropSide = targetEdge;
+    } else {
+      delete view.root.dataset.swapDropSide;
+    }
+  }
+}
+
+function resolvePaneSwapTarget(clientX, clientY, sourcePaneId) {
+  const hitElement = document.elementFromPoint(clientX, clientY);
+  if (!(hitElement instanceof Element)) {
+    return {
+      paneId: "",
+      targetEdge: "",
+      preferredLayoutVariants: [],
+    };
+  }
+
+  const paneElement = hitElement.closest(".pane");
+  if (!(paneElement instanceof HTMLElement)) {
+    return {
+      paneId: "",
+      targetEdge: "",
+      preferredLayoutVariants: [],
+    };
+  }
+
+  const paneId = String(paneElement.dataset.paneId || "").trim();
+  if (!paneId || paneId === sourcePaneId) {
+    return {
+      paneId: "",
+      targetEdge: "",
+      preferredLayoutVariants: [],
+    };
+  }
+
+  const paneSnapshot = (state.layout?.panes || []).find((pane) => pane?.id === paneId);
+  if (paneSnapshot?.state !== "visible") {
+    return {
+      paneId: "",
+      targetEdge: "",
+      preferredLayoutVariants: [],
+    };
+  }
+
+  const rect = paneElement.getBoundingClientRect();
+  const normalizedX = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+  const normalizedY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+  const offsetX = normalizedX - 0.5;
+  const offsetY = normalizedY - 0.5;
+  const targetEdge = Math.abs(offsetX) >= Math.abs(offsetY)
+    ? offsetX < 0
+      ? "left"
+      : "right"
+    : offsetY < 0
+      ? "top"
+      : "bottom";
+  const preferredLayoutVariants = getPreferredLayoutVariantsForPaneSwap(
+    state.layout,
+    sourcePaneId,
+    paneId,
+    targetEdge,
+  );
+
+  return {
+    paneId,
+    targetEdge,
+    preferredLayoutVariants,
+  };
+}
+
+async function reorderPanePositions(sourcePaneId, targetPaneId, targetEdge, preferredLayoutVariants = []) {
+  if (
+    !state.layout
+    || !sourcePaneId
+    || !targetPaneId
+    || sourcePaneId === targetPaneId
+    || !targetEdge
+  ) {
+    return false;
+  }
+
+  const nextLayout = JSON.parse(JSON.stringify(state.layout));
+  const currentPreset = getPresetConfig(nextLayout, nextLayout.presetId);
+  const visiblePanes = nextLayout.panes
+    .filter((pane) => pane?.state === "visible")
+    .sort((a, b) => (a?.positionIndex ?? 0) - (b?.positionIndex ?? 0));
+  const originalOrder = visiblePanes.map((pane) => pane.id);
+  const sourcePane = visiblePanes.find((pane) => pane?.id === sourcePaneId);
+  const targetPane = visiblePanes.find((pane) => pane?.id === targetPaneId);
+  if (!sourcePane || !targetPane) {
+    return false;
+  }
+
+  const nextLayoutState = chooseNextPaneLayoutState(
+    nextLayout,
+    sourcePaneId,
+    targetPaneId,
+    targetEdge,
+    preferredLayoutVariants,
+  );
+  if (!nextLayoutState) {
+    return false;
+  }
+
+  const nextOrder = nextLayoutState.orderIds;
+  const isSameOrder = nextOrder.length === originalOrder.length
+    && nextOrder.every((paneId, index) => paneId === originalOrder[index]);
+  if (isSameOrder && nextLayoutState.layoutVariant === currentPreset.layoutVariant) {
+    return false;
+  }
+
+  const visiblePaneById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
+  nextOrder.forEach((paneId, index) => {
+    const pane = visiblePaneById.get(paneId);
+    if (!pane) {
+      return;
+    }
+    pane.positionIndex = index;
+    pane.groupId = getGroupIdByPositionIndexForGridShape(index, nextLayoutState.gridShape);
+  });
+
+  nextLayout.layoutVariant = nextLayoutState.layoutVariant;
+  nextLayout.gridShape = nextLayoutState.gridShape;
+  if (
+    currentPreset.columns !== nextLayoutState.gridShape.columns
+    || currentPreset.rows !== nextLayoutState.gridShape.rows
+  ) {
+    nextLayout.gridTracks = null;
+  }
+
+  const result = await persistActiveLayoutSnapshot(nextLayout);
+  if (!result?.ok) {
+    setStatusLine("터미널 재배치 실패");
+    return false;
+  }
+
+  const savedLayout = result.layout || nextLayout;
+  rememberSessionCapabilities(savedLayout?.sessionCapabilities || {});
+  renderLayout(savedLayout);
+
+  const sourceSessionId = sourcePane.sessionId;
+  if (sourceSessionId) {
+    getSessionViewBySessionId(sourceSessionId)?.terminal?.focus();
+  }
+
+  setStatusLine("터미널 재배치");
+  return true;
+}
+
+function stopPaneSwap(options = {}) {
+  const { commit = true } = options;
+  const drag = state.activePaneSwap;
+  if (!drag) {
+    syncPaneSwapVisualState();
+    return;
+  }
+
+  window.removeEventListener("pointermove", drag.handlePointerMove, true);
+  window.removeEventListener("pointerup", drag.handlePointerUp, true);
+  window.removeEventListener("pointercancel", drag.handlePointerCancel, true);
+  window.removeEventListener("blur", drag.handlePointerCancel);
+  drag.handleElement?.classList.remove("is-active");
+
+  state.activePaneSwap = null;
+  syncPaneSwapVisualState();
+
+  if (commit && drag.isDragging && drag.targetPaneId && drag.targetEdge) {
+    void reorderPanePositions(
+      drag.sourcePaneId,
+      drag.targetPaneId,
+      drag.targetEdge,
+      drag.preferredLayoutVariants,
+    );
+  }
+}
+
+function isPaneSwapInteractiveTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return Boolean(
+    target.closest(
+      "button, a, input, select, textarea, summary, [role='button'], [contenteditable='true'], .pane-editor-menu",
+    ),
+  );
+}
+
+function startPaneSwap(view, event) {
+  if (!view?.paneId || !state.layout || event.button !== 0) {
+    return;
+  }
+
+  if (isPaneSwapInteractiveTarget(event.target)) {
+    return;
+  }
+
+  if (getVisiblePanes(state.layout).length < 2) {
+    return;
+  }
+
+  stopGridResize({ persist: true });
+  stopPaneSwap({ commit: false });
+  closeShellMenu(view);
+  view.editorMenu?.classList.remove("is-open");
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const drag = {
+    sourcePaneId: view.paneId,
+    targetPaneId: "",
+    targetEdge: "",
+    preferredLayoutVariants: [],
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    isDragging: false,
+    handleElement: event.currentTarget instanceof HTMLElement ? event.currentTarget : null,
+    handlePointerMove: null,
+    handlePointerUp: null,
+    handlePointerCancel: null,
+  };
+
+  const handlePointerMove = (moveEvent) => {
+    if (moveEvent.buttons === 0) {
+      stopPaneSwap({ commit: true });
+      return;
+    }
+
+    const deltaX = moveEvent.clientX - drag.startClientX;
+    const deltaY = moveEvent.clientY - drag.startClientY;
+    if (!drag.isDragging && Math.hypot(deltaX, deltaY) < PANE_SWAP_DRAG_THRESHOLD_PX) {
+      return;
+    }
+
+    moveEvent.preventDefault();
+    if (!drag.isDragging) {
+      drag.isDragging = true;
+      drag.handleElement?.classList.add("is-active");
+    }
+
+    const nextTarget = resolvePaneSwapTarget(
+      moveEvent.clientX,
+      moveEvent.clientY,
+      drag.sourcePaneId,
+    );
+    if (
+      drag.targetPaneId !== nextTarget.paneId
+      || drag.targetEdge !== nextTarget.targetEdge
+      || !areStringArraysEqual(drag.preferredLayoutVariants, nextTarget.preferredLayoutVariants)
+    ) {
+      drag.targetPaneId = nextTarget.paneId;
+      drag.targetEdge = nextTarget.targetEdge;
+      drag.preferredLayoutVariants = [...nextTarget.preferredLayoutVariants];
+      syncPaneSwapVisualState();
+    } else if (!document.body.classList.contains("is-pane-swapping")) {
+      syncPaneSwapVisualState();
+    }
+  };
+
+  const handlePointerUp = () => {
+    stopPaneSwap({ commit: true });
+  };
+  const handlePointerCancel = () => {
+    stopPaneSwap({ commit: false });
+  };
+
+  drag.handlePointerMove = handlePointerMove;
+  drag.handlePointerUp = handlePointerUp;
+  drag.handlePointerCancel = handlePointerCancel;
+  state.activePaneSwap = drag;
+
+  window.addEventListener("pointermove", handlePointerMove, true);
+  window.addEventListener("pointerup", handlePointerUp, true);
+  window.addEventListener("pointercancel", handlePointerCancel, true);
+  window.addEventListener("blur", handlePointerCancel);
+}
+
+function startGridResize(axis, trackIndex, event) {
+  if (!ui.grid || !state.layout || event.button !== 0) {
+    return;
+  }
+
+  const preset = getPresetConfig(state.layout, state.layout.presetId);
+  const tracks = getEffectiveGridTracks(state.layout, preset);
+  const isColumnResize = axis === "columns";
+  const axisTracks = isColumnResize ? tracks.columns : tracks.rows;
+  if (trackIndex < 0 || trackIndex >= axisTracks.length - 1) {
+    return;
+  }
+
+  const gapPx = getGridGapPx(axis);
+  const containerSizePx = isColumnResize ? ui.grid.clientWidth : ui.grid.clientHeight;
+  const trackPixelSizes = buildTrackPixelSizes(containerSizePx, axisTracks, gapPx);
+  const pairTotalPx = (trackPixelSizes[trackIndex] || 0) + (trackPixelSizes[trackIndex + 1] || 0);
+  if (pairTotalPx <= 0) {
+    return;
+  }
+
+  stopGridResize({ persist: true });
+  event.preventDefault();
+  event.stopPropagation();
+
+  const constraints = getLayoutConstraints(state.layout);
+  const configuredMinTrackSizePx = isColumnResize
+    ? constraints.minPanelWidthPx
+    : constraints.minPanelHeightPx;
+  const minTrackSizePx = Math.max(1, Math.min(configuredMinTrackSizePx, pairTotalPx / 2));
+  const handleElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+
+  const handlePointerMove = (moveEvent) => {
+    if (moveEvent.buttons === 0) {
+      stopGridResize({ persist: true });
+      return;
+    }
+    moveEvent.preventDefault();
+    updateActiveGridResize(isColumnResize ? moveEvent.clientX : moveEvent.clientY);
+  };
+  const handlePointerUp = () => {
+    stopGridResize({ persist: true });
+  };
+  const handlePointerCancel = () => {
+    stopGridResize({ persist: true });
+  };
+
+  state.activeGridResize = {
+    axis,
+    preset,
+    trackIndex,
+    trackPixelSizes,
+    otherAxisTracks: isColumnResize ? [...tracks.rows] : [...tracks.columns],
+    startPrimaryTrackSizePx: trackPixelSizes[trackIndex] || 0,
+    startClientCoordinatePx: isColumnResize ? event.clientX : event.clientY,
+    pairTotalPx,
+    minTrackSizePx,
+    didChange: false,
+    handleElement,
+    handlePointerMove,
+    handlePointerUp,
+    handlePointerCancel,
+  };
+
+  handleElement?.classList.add("is-active");
+  setGridResizeCursor(axis);
+  window.addEventListener("pointermove", handlePointerMove, true);
+  window.addEventListener("pointerup", handlePointerUp, true);
+  window.addEventListener("pointercancel", handlePointerCancel, true);
+  window.addEventListener("blur", handlePointerCancel);
+}
+
+function renderGridSplitters(layout, preset) {
+  clearGridSplitters();
+  if (!ui.grid || !layout || !preset) {
+    return;
+  }
+
+  const splitterSegments = buildGridSplitterSegments(layout, preset);
+  splitterSegments.forEach((segment) => {
+    const splitter = document.createElement("div");
+    const axis = segment.axis === "rows" ? "rows" : "columns";
+    const trackIndex = Math.max(0, Math.floor(Number(segment.trackIndex) || 0));
+    splitter.className = axis === "rows"
+      ? "pane-grid-splitter pane-grid-splitter-horizontal"
+      : "pane-grid-splitter pane-grid-splitter-vertical";
+    splitter.dataset.axis = axis;
+    splitter.dataset.trackIndex = String(trackIndex);
+    splitter.dataset.segmentStart = String(Math.max(0, Math.floor(Number(segment.segmentStart) || 0)));
+    splitter.dataset.segmentEnd = String(Math.max(0, Math.floor(Number(segment.segmentEnd) || 0)));
+    splitter.setAttribute("aria-hidden", "true");
+    splitter.addEventListener("pointerdown", (event) => {
+      startGridResize(axis, trackIndex, event);
+    });
+    ui.grid.appendChild(splitter);
+  });
+
+  syncGridSplittersLayout();
 }
 
 function getDisplayStatus(status) {
@@ -1876,6 +3468,8 @@ function restorePaneSnapshot(view) {
 }
 
 function clearPaneViews() {
+  stopPaneSwap({ commit: false });
+  stopGridResize({ persist: false });
   for (const view of state.paneViews.values()) {
     rememberPaneSnapshot(view);
     if (view?.sessionId) {
@@ -1907,6 +3501,7 @@ function clearPaneViews() {
     if (typeof view.handleEditorMenuOutsideClick === "function") {
       document.removeEventListener("click", view.handleEditorMenuOutsideClick);
     }
+
     view.terminal?.dispose();
   }
   state.paneViews.clear();
@@ -2620,20 +4215,7 @@ async function getAgentLaunchCommand(agentCommand, fullAccessEnabled) {
   if (!config) {
     return null;
   }
-  let cmd = fullAccessEnabled ? config.fullAccess : config.normal;
-
-  if (api?.app?.process?.readAgentsPolicy) {
-    try {
-      const result = await api.app.process.readAgentsPolicy();
-      if (result?.ok && result.path && result.content?.trim().length > 0) {
-        // We instruct the agent to read the AGENTS.md file from the app's installation directory.
-        cmd += ` "I'll load ${result.path} now and align my behavior to it before taking any further action."`;
-      }
-    } catch (_error) {
-      // Silently ignore policy read errors
-    }
-  }
-  return cmd;
+  return fullAccessEnabled ? config.fullAccess : config.normal;
 }
 
 async function runAgentForView(view, agentCommand, options = {}) {
@@ -2649,6 +4231,7 @@ async function runAgentForView(view, agentCommand, options = {}) {
     return;
   }
 
+  clearPaneAttention(view.sessionId);
   writeToSession(view.sessionId, `${command}\r`, { errorPrefix: "명령 전송 실패" });
   view.terminal.focus();
   if (!options.silent) {
@@ -2716,7 +4299,7 @@ function createSessionExitWaiter(sessionId, timeoutMs = 3000) {
   };
 }
 
-async function killAndRecreateSession(view, reason = "agent-terminate") {
+async function killAndRecreateSession(view, reason = "agent-terminate", options = {}) {
   if (!view?.sessionId) {
     throw new Error("missing session");
   }
@@ -2724,6 +4307,7 @@ async function killAndRecreateSession(view, reason = "agent-terminate") {
   const sessionId = view.sessionId;
   const cols = Math.max(2, view.terminal?.cols || 80);
   const rows = Math.max(1, view.terminal?.rows || 24);
+  const shellOverride = typeof options.shellOverride === "string" ? options.shellOverride.trim() : "";
   const createPayload = {
     sessionId,
     cols,
@@ -2733,8 +4317,9 @@ async function killAndRecreateSession(view, reason = "agent-terminate") {
   if (typeof view.cwd === "string" && view.cwd.length > 0) {
     createPayload.cwd = view.cwd;
   }
-  if (typeof view.sessionShell === "string" && view.sessionShell.length > 0) {
-    createPayload.shell = view.sessionShell;
+  const nextShell = shellOverride || view.sessionShell;
+  if (typeof nextShell === "string" && nextShell.length > 0) {
+    createPayload.shell = nextShell;
   }
 
   const capabilityToken = getSessionCapabilityToken(sessionId);
@@ -2743,6 +4328,7 @@ async function killAndRecreateSession(view, reason = "agent-terminate") {
   }
 
   const exitWaiter = createSessionExitWaiter(sessionId);
+  markExpectedSessionExit(sessionId, reason);
   const killResult = await api.pty.kill({
     sessionId,
     capabilityToken,
@@ -2750,6 +4336,7 @@ async function killAndRecreateSession(view, reason = "agent-terminate") {
   });
 
   if (killResult?.reason === "already-stopped" || killResult?.reason === "missing-session") {
+    clearExpectedSessionExit(sessionId);
     exitWaiter.cancel();
   } else {
     const didExit = await exitWaiter.promise;
@@ -2763,6 +4350,11 @@ async function killAndRecreateSession(view, reason = "agent-terminate") {
     throw new Error("session recreate failed");
   }
   rememberSessionCapability(recreated.id, recreated.capabilityToken);
+  view.sessionShell = typeof recreated.shell === "string" && recreated.shell.length > 0
+    ? recreated.shell
+    : nextShell;
+  syncViewShellPresentation(view);
+  clearPaneAttention(sessionId);
 }
 
 async function stopActiveAgentForView(view, options = {}) {
@@ -3417,6 +5009,7 @@ const EDITOR_ICONS = {
 let cachedEditorList = null;
 let pendingEditorListQuery = null;
 
+
 function normalizeEditorMenuItems(editors = []) {
   if (!Array.isArray(editors)) {
     return [];
@@ -3536,16 +5129,13 @@ async function populateEditorMenu(view, options = {}) {
 
       itemBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
-        const isAlreadySelected = view.selectedEditorId === editor.id;
         view.selectedEditorId = editor.id;
         renderItems(items);
         view.editorMenu.classList.remove("is-open");
-        if (isAlreadySelected) {
-          await openEditorForView(view, {
-            editorId: editor.id,
-            editorName: editor.name,
-          });
-        }
+        await openEditorForView(view, {
+          editorId: editor.id,
+          editorName: editor.name,
+        });
       });
 
       view.editorMenu.appendChild(itemBtn);
@@ -3557,15 +5147,26 @@ async function populateEditorMenu(view, options = {}) {
   renderItems(Array.isArray(cachedEditorList) ? cachedEditorList : []);
 }
 
+
+
+
+
+
 function createPaneView(pane, index, preset, sessionMap) {
   const session = pane.sessionId ? sessionMap.get(pane.sessionId) : null;
   const initialCwd = typeof session?.cwd === "string" ? session.cwd.trim() : "";
 
   const root = document.createElement("section");
   root.className = "pane";
+  root.dataset.paneId = pane.id;
 
   const header = document.createElement("header");
   header.className = "pane-header";
+  header.title = "드래그해서 터미널 위치 교환";
+
+  const swapHandle = document.createElement("div");
+  swapHandle.className = "pane-swap-handle";
+  swapHandle.setAttribute("aria-hidden", "true");
 
   const body = document.createElement("div");
   body.className = "pane-body";
@@ -3576,6 +5177,12 @@ function createPaneView(pane, index, preset, sessionMap) {
   actionsLeft.className = "pane-actions-group";
   const actionsRight = document.createElement("div");
   actionsRight.className = "pane-actions-group";
+  const attentionBadge = document.createElement("span");
+  attentionBadge.className = "pane-attention-badge";
+  const agentSegment = document.createElement("div");
+  agentSegment.className = "pane-action-segment pane-agent-segment";
+  const utilitySegment = document.createElement("div");
+  utilitySegment.className = "pane-action-segment pane-utility-segment";
 
   const browseButton = document.createElement("button");
   browseButton.type = "button";
@@ -3616,12 +5223,7 @@ function createPaneView(pane, index, preset, sessionMap) {
   geminiButton.textContent = "Gemini";
   geminiButton.setAttribute("aria-pressed", "false");
 
-  const fullAccessButton = document.createElement("button");
-  fullAccessButton.type = "button";
-  fullAccessButton.className = "pane-path-btn pane-full-access-btn";
-  fullAccessButton.title = "모든권한";
-  fullAccessButton.textContent = "모든권한";
-  fullAccessButton.setAttribute("aria-pressed", "false");
+
 
   const editorGroup = document.createElement("div");
   editorGroup.className = "pane-editor-group";
@@ -3685,21 +5287,32 @@ function createPaneView(pane, index, preset, sessionMap) {
 
   const footer = document.createElement("footer");
   footer.className = "pane-footer";
+  const footerAttention = document.createElement("span");
+  footerAttention.className = "pane-footer-attention";
+  const footerShell = document.createElement("span");
+  footerShell.className = "pane-footer-shell";
   const footerPath = document.createElement("span");
   footerPath.className = "pane-footer-path";
+  footer.appendChild(footerAttention);
+  footer.appendChild(footerShell);
   footer.appendChild(footerPath);
 
-  actionsLeft.appendChild(codexButton);
-  actionsLeft.appendChild(claudeButton);
-  actionsLeft.appendChild(geminiButton);
+  agentSegment.appendChild(codexButton);
+  agentSegment.appendChild(claudeButton);
+  agentSegment.appendChild(geminiButton);
+  utilitySegment.appendChild(clearButton);
+  utilitySegment.appendChild(browseButton);
+  utilitySegment.appendChild(terminateButton);
+
+  actionsLeft.appendChild(attentionBadge);
+  actionsLeft.appendChild(agentSegment);
+
   actionsRight.appendChild(editorGroup);
-  actionsRight.appendChild(fullAccessButton);
-  actionsRight.appendChild(clearButton);
-  actionsRight.appendChild(browseButton);
-  actionsRight.appendChild(terminateButton);
+  actionsRight.appendChild(utilitySegment);
   actionsOverlay.appendChild(actionsLeft);
   actionsOverlay.appendChild(actionsRight);
   header.appendChild(actionsOverlay);
+  header.appendChild(swapHandle);
   root.appendChild(header);
   body.appendChild(terminalHost);
   body.appendChild(clipboardPreviewContainer);
@@ -3719,22 +5332,23 @@ function createPaneView(pane, index, preset, sessionMap) {
       width: 1,
     },
     theme: {
-      background: "#1e1e1e",
+      background: "#2d323b",
       foreground: "#cccccc",
       cursor: "#aeafad",
-      cursorAccent: "#1e1e1e",
+      cursorAccent: "#2d323b",
       selectionBackground: "rgba(255, 255, 255, 0.2)",
       selectionInactiveBackground: "rgba(255, 255, 255, 0.12)",
       scrollbarSliderBackground: "rgba(121, 121, 121, 0.36)",
       scrollbarSliderHoverBackground: "rgba(121, 121, 121, 0.52)",
       scrollbarSliderActiveBackground: "rgba(121, 121, 121, 0.64)",
-      overviewRulerBorder: "#1e1e1e",
+      overviewRulerBorder: "#2d323b",
     },
   });
   const fitAddon = new FitAddonCtor();
   terminal.loadAddon(fitAddon);
 
   const view = {
+    paneId: pane.id,
     root,
     header,
     body,
@@ -3745,6 +5359,9 @@ function createPaneView(pane, index, preset, sessionMap) {
     fitAddon,
     sessionId: pane.sessionId || null,
     cwd: initialCwd,
+    attentionBadge,
+    footerAttention,
+    footerShell,
     footerPath,
     sessionShell: session?.shell || "",
     terminateButton,
@@ -3753,7 +5370,8 @@ function createPaneView(pane, index, preset, sessionMap) {
     codexButton,
     claudeButton,
     geminiButton,
-    fullAccessButton,
+    fullAccessButton: null,
+
     editorGroup,
     openButton,
     openMenuButton,
@@ -3775,13 +5393,17 @@ function createPaneView(pane, index, preset, sessionMap) {
     pendingSigintExpiresAt: 0,
     pendingSigintTimer: null,
     handleEditorMenuOutsideClick: null,
+
     clipboardPreviewContainer,
     clipboardPreviewImage,
     clipboardPreviewName,
     clipboardPreviewMeta,
+    swapHandle,
   };
 
   restorePaneSnapshot(view);
+  syncViewShellPresentation(view);
+  applyViewAttention(view, state.attentionBySessionId.get(view.sessionId) || null);
 
   const handleWheelCapture = (event) =>
     handleTerminalHostWheelCapture(event, terminal, view);
@@ -3795,6 +5417,7 @@ function createPaneView(pane, index, preset, sessionMap) {
     if (!pane.sessionId) {
       return;
     }
+    clearPaneAttention(pane.sessionId);
     if (shouldHideClipboardPreviewByInput(data)) {
       hideClipboardPreview(view);
     }
@@ -3811,13 +5434,30 @@ function createPaneView(pane, index, preset, sessionMap) {
   const rememberedAgent = getRememberedAgentSelection(view.sessionId);
   setAgentCommandSelection(view, rememberedAgent);
   setFullAccessEnabled(view, DEFAULT_FULL_ACCESS_ENABLED);
+  syncShellControls(view);
+
+  root.addEventListener("pointerdown", (event) => {
+    if (view.sessionId) {
+      clearPaneAttention(view.sessionId);
+    }
+    closeShellMenu(view);
+    if (!editorGroup.contains(event.target)) {
+      view.editorMenu.classList.remove("is-open");
+    }
+  });
 
   browseButton.addEventListener("click", async (event) => {
     event.stopPropagation();
     await browseDirectoryForView(view);
   });
+
+  header.addEventListener("pointerdown", (event) => {
+    startPaneSwap(view, event);
+  });
+
   openButton.addEventListener("click", async (event) => {
     event.stopPropagation();
+
     editorMenu.classList.remove("is-open");
     await openEditorForView(view);
   });
@@ -3827,6 +5467,7 @@ function createPaneView(pane, index, preset, sessionMap) {
     if (openMenuButton.disabled) {
       return;
     }
+
     const shouldForceRefresh = Array.isArray(cachedEditorList) && cachedEditorList.length === 0;
     if (editorMenu.childElementCount <= 1 || shouldForceRefresh) {
       await populateEditorMenu(view, { forceRefresh: shouldForceRefresh });
@@ -3843,7 +5484,10 @@ function createPaneView(pane, index, preset, sessionMap) {
   view.handleEditorMenuOutsideClick = handleEditorMenuOutsideClick;
   document.addEventListener("click", handleEditorMenuOutsideClick);
 
+
+
   populateEditorMenu(view);
+  syncViewShellPresentation(view);
   codexButton.addEventListener("click", async (event) => {
     event.stopPropagation();
     await runCodexForView(view);
@@ -3855,10 +5499,6 @@ function createPaneView(pane, index, preset, sessionMap) {
   geminiButton.addEventListener("click", async (event) => {
     event.stopPropagation();
     await runGeminiForView(view);
-  });
-  fullAccessButton.addEventListener("click", async (event) => {
-    event.stopPropagation();
-    await toggleFullAccessForView(view);
   });
   clearButton.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -3962,6 +5602,8 @@ function updatePaneStatusBySessionId(sessionId, status, cwd, shell) {
   }
   if (typeof shell === "string" && shell.length > 0) {
     view.sessionShell = shell;
+    syncViewShellPresentation(view);
+    populateShellMenu(view);
   }
 }
 
@@ -3999,12 +5641,22 @@ function renderLayout(layout) {
   const preset = getPresetConfig(state.layout, state.layout.presetId);
   const visiblePanes = getVisiblePanes(state.layout);
   const sessionMap = withSessionById(state.layout);
+  const panePlacements = getPanePlacementsForLayoutVariant(
+    preset.layoutVariant,
+    visiblePanes.length,
+  );
 
   applyGridPreset(state.layout.presetId);
+  applyGridTracks(state.layout, preset);
   highlightPresetButtons(state.layout.presetId);
 
   visiblePanes.forEach((pane, index) => {
     const view = createPaneView(pane, index, preset, sessionMap);
+    const placement = panePlacements[index];
+    if (placement) {
+      view.root.style.gridColumn = `${placement.columnStart} / ${placement.columnEnd}`;
+      view.root.style.gridRow = `${placement.rowStart} / ${placement.rowEnd}`;
+    }
     state.paneViews.set(pane.id, view);
     if (pane.sessionId) {
       state.sessionToPaneId.set(pane.sessionId, pane.id);
@@ -4020,6 +5672,8 @@ function renderLayout(layout) {
     syncPaneOverlayLayout(view);
     scheduleFitAndResize(view);
   });
+
+  renderGridSplitters(state.layout, preset);
 
   updateTitlebarPathSettingVisibility();
   updatePresetButtonVisibility();
@@ -4126,37 +5780,6 @@ function bindEvents() {
     }
     closeSkillManagerDialog();
   });
-  ui.agentsPolicyEditor?.addEventListener("input", () => {
-    syncAgentsPolicyControls();
-  });
-  ui.agentsPolicyEditor?.addEventListener("keydown", (event) => {
-    if (!event.ctrlKey && !event.metaKey) {
-      return;
-    }
-    if (String(event.key || "").toLowerCase() !== "s") {
-      return;
-    }
-    event.preventDefault();
-    saveAgentsPolicyEditorContent();
-  });
-  ui.agentsPolicyCancelButton?.addEventListener("click", () => {
-    closeAgentsPolicyDialog();
-  });
-  ui.agentsPolicySaveButton?.addEventListener("click", async () => {
-    await saveAgentsPolicyEditorContent();
-  });
-  ui.agentsPolicyReloadButton?.addEventListener("click", async () => {
-    await reloadAgentsPolicyEditorContent();
-  });
-  ui.agentsPolicyOpenEditorButton?.addEventListener("click", async () => {
-    await openAgentsPolicyInExternalEditor();
-  });
-  ui.agentsPolicyOverlay?.addEventListener("click", (event) => {
-    if (event.target !== ui.agentsPolicyOverlay) {
-      return;
-    }
-    closeAgentsPolicyDialog();
-  });
 
   ui.windowMinimizeButton?.addEventListener("click", () => {
     api.app.window.minimize();
@@ -4175,10 +5798,6 @@ function bindEvents() {
   });
   ui.titlebarSkillManagerButton?.addEventListener("click", () => {
     openSkillManagerDialog();
-  });
-
-  ui.titlebarEditAgentsButton?.addEventListener("click", async () => {
-    await openAgentsPolicyDialog();
   });
 
   ui.titlebarFontSettingButton?.addEventListener("click", () => {
@@ -4210,6 +5829,16 @@ function bindEvents() {
     window.removeEventListener("drop", preventFileDropNavigation);
   });
 
+  if (ui.grid && typeof ResizeObserver === "function") {
+    const gridResizeObserver = new ResizeObserver(() => {
+      syncGridSplittersLayout();
+    });
+    gridResizeObserver.observe(ui.grid);
+    state.eventUnsubscribers.push(() => {
+      gridResizeObserver.disconnect();
+    });
+  }
+
   const handleEscapeForInstallPrompt = (event) => {
     if (isFontSizeDecreaseShortcut(event)) {
       event.preventDefault();
@@ -4221,10 +5850,6 @@ function bindEvents() {
       return;
     }
     event.preventDefault();
-    if (isAgentsPolicyOverlayVisible()) {
-      closeAgentsPolicyDialog();
-      return;
-    }
     if (isSkillManagerOverlayVisible()) {
       closeSkillManagerDialog();
       return;
@@ -4238,9 +5863,6 @@ function bindEvents() {
   state.eventUnsubscribers.push(() => {
     window.removeEventListener("keydown", handleEscapeForInstallPrompt, true);
   });
-
-  setAgentsPolicyPathText(state.agentsPolicyPath);
-  syncAgentsPolicyControls();
 
   state.eventUnsubscribers.push(
     api.app.window.onState((payload) => {
@@ -4266,9 +5888,13 @@ function bindEvents() {
 
   state.eventUnsubscribers.push(
     api.pty.onExit((payload) => {
-      maybeNotifySessionExit(payload);
-      state.pendingQuestionInputBySessionId.delete(String(payload?.sessionId || ""));
-      state.lastConfirmationNotificationAtBySessionId.delete(String(payload?.sessionId || ""));
+      const sessionId = String(payload?.sessionId || "");
+      const expectedExit = consumeExpectedSessionExit(sessionId);
+      if (!expectedExit) {
+        maybeNotifySessionExit(payload);
+      }
+      state.pendingQuestionInputBySessionId.delete(sessionId);
+      state.lastConfirmationNotificationAtBySessionId.delete(sessionId);
       appendOutput(
         payload.sessionId,
         `\r\n[session ${payload.sessionId} exited: code=${payload.exitCode}, status=${payload.status}]\r\n`,

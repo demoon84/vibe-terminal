@@ -5,7 +5,6 @@ const {
   getPresetDefinition,
   getMaxPanelCount,
   isPresetId,
-  getGroupIdByPositionIndex,
   clonePlainObject,
   createId,
 } = require("../shared/models");
@@ -33,6 +32,162 @@ function sortBySlot(a, b) {
   return a.slotIndex - b.slotIndex;
 }
 
+function getDefaultGridShapeForPreset(presetId) {
+  const preset = getPresetDefinition(presetId);
+  return {
+    columns: preset.columns,
+    rows: preset.rows,
+  };
+}
+
+function getAllowedGridShapesForPreset(presetId) {
+  const preset = getPresetDefinition(presetId);
+  switch (preset.panelCount) {
+    case 1:
+      return [{ columns: 1, rows: 1 }];
+    case 2:
+      return [
+        { columns: 2, rows: 1 },
+        { columns: 1, rows: 2 },
+      ];
+    case 3:
+      return [
+        { columns: 3, rows: 1 },
+        { columns: 1, rows: 3 },
+        { columns: 2, rows: 2 },
+      ];
+    case 4:
+      return [
+        { columns: 2, rows: 2 },
+        { columns: 4, rows: 1 },
+        { columns: 1, rows: 4 },
+        { columns: 3, rows: 2 },
+        { columns: 2, rows: 3 },
+      ];
+    default:
+      return [getDefaultGridShapeForPreset(presetId)];
+  }
+}
+
+function normalizeGridShape(gridShape, presetId) {
+  const fallback = getDefaultGridShapeForPreset(presetId);
+  if (!gridShape || typeof gridShape !== "object") {
+    return fallback;
+  }
+
+  const columns = Math.max(1, Math.floor(asNumber(gridShape.columns, 0)));
+  const rows = Math.max(1, Math.floor(asNumber(gridShape.rows, 0)));
+  const match = getAllowedGridShapesForPreset(presetId).find(
+    (shape) => shape.columns === columns && shape.rows === rows,
+  );
+  return match ? { columns: match.columns, rows: match.rows } : fallback;
+}
+
+function getAllowedLayoutVariantsForPreset(presetId) {
+  const preset = getPresetDefinition(presetId);
+  switch (preset.panelCount) {
+    case 1:
+      return ["single"];
+    case 2:
+      return ["row", "column"];
+    case 3:
+      return ["row", "column", "stack-left", "stack-right", "stack-top", "stack-bottom"];
+    case 4:
+      return ["grid", "row", "column", "stack-left", "stack-right", "stack-top", "stack-bottom"];
+    default:
+      return ["grid"];
+  }
+}
+
+function getGridShapeForLayoutVariant(layoutVariant, presetId) {
+  const preset = getPresetDefinition(presetId);
+  switch (preset.panelCount) {
+    case 1:
+      return { columns: 1, rows: 1 };
+    case 2:
+      return layoutVariant === "column"
+        ? { columns: 1, rows: 2 }
+        : { columns: 2, rows: 1 };
+    case 3:
+      if (layoutVariant === "column") {
+        return { columns: 1, rows: 3 };
+      }
+      if (layoutVariant === "stack-left" || layoutVariant === "stack-right" || layoutVariant === "stack-top" || layoutVariant === "stack-bottom") {
+        return { columns: 2, rows: 2 };
+      }
+      return { columns: 3, rows: 1 };
+    case 4:
+      if (layoutVariant === "row") {
+        return { columns: 4, rows: 1 };
+      }
+      if (layoutVariant === "column") {
+        return { columns: 1, rows: 4 };
+      }
+      if (layoutVariant === "stack-left" || layoutVariant === "stack-right") {
+        return { columns: 3, rows: 2 };
+      }
+      if (layoutVariant === "stack-top" || layoutVariant === "stack-bottom") {
+        return { columns: 2, rows: 3 };
+      }
+      return { columns: 2, rows: 2 };
+    default:
+      return {
+        columns: preset.columns,
+        rows: preset.rows,
+      };
+  }
+}
+
+function normalizeLayoutVariant(layoutVariant, presetId, gridShape) {
+  const allowedVariants = getAllowedLayoutVariantsForPreset(presetId);
+  const normalizedVariant = typeof layoutVariant === "string" ? layoutVariant.trim() : "";
+  if (allowedVariants.includes(normalizedVariant)) {
+    return normalizedVariant;
+  }
+
+  const preset = getPresetDefinition(presetId);
+  const shape = normalizeGridShape(gridShape, presetId);
+  switch (preset.panelCount) {
+    case 1:
+      return "single";
+    case 2:
+      return shape.rows > shape.columns ? "column" : "row";
+    case 3:
+      if (shape.columns === 1 && shape.rows === 3) {
+        return "column";
+      }
+      if (shape.columns === 2 && shape.rows === 2) {
+        return "stack-left";
+      }
+      return "row";
+    case 4:
+      if (shape.columns === 1 && shape.rows === 4) {
+        return "column";
+      }
+      if (shape.columns === 4 && shape.rows === 1) {
+        return "row";
+      }
+      if (shape.columns === 3 && shape.rows === 2) {
+        return "stack-left";
+      }
+      if (shape.columns === 2 && shape.rows === 3) {
+        return "stack-top";
+      }
+      return "grid";
+    default:
+      return allowedVariants[0] || "grid";
+  }
+}
+
+function getGroupIdByPositionIndexForGridShape(positionIndex, gridShape, presetId) {
+  const columns = Math.max(
+    1,
+    Math.floor(asNumber(gridShape?.columns, getDefaultGridShapeForPreset(presetId).columns)),
+  );
+  const row = Math.floor(Math.max(0, asNumber(positionIndex, 0)) / columns);
+  return `row-${row + 1}`;
+}
+
 class LayoutManager {
   constructor(options = {}) {
     const { sessionManager, defaultPresetId = PRESET_IDS.ONE_BY_TWO } = options;
@@ -46,6 +201,8 @@ class LayoutManager {
     this.activeLayout = {
       presetId: this.defaultPresetId,
       panes: this._createEmptyPanes(),
+      layoutVariant: normalizeLayoutVariant(null, this.defaultPresetId, null),
+      gridShape: getDefaultGridShapeForPreset(this.defaultPresetId),
       gridTracks: null,
     };
   }
@@ -58,6 +215,8 @@ class LayoutManager {
     return {
       presetId: this.activeLayout.presetId,
       panes: this.activeLayout.panes.map((pane) => clonePlainObject(pane)),
+      layoutVariant: this.activeLayout.layoutVariant,
+      gridShape: clonePlainObject(this.activeLayout.gridShape),
       sessions: this.sessionManager.snapshotSessions(sessionIds),
       gridTracks: this.activeLayout.gridTracks
         ? {
@@ -81,6 +240,8 @@ class LayoutManager {
     }
 
     const nextPreset = getPresetDefinition(presetId);
+    const nextLayoutVariant = normalizeLayoutVariant(null, presetId, null);
+    const nextGridShape = getGridShapeForLayoutVariant(nextLayoutVariant, presetId);
     const panes = this.activeLayout.panes;
     const requestedMinimum = Math.max(0, Math.floor(asNumber(minPanelCount, 0)));
     const preferredIdSet = new Set(
@@ -157,36 +318,52 @@ class LayoutManager {
       }
 
       pane.positionIndex = pane.slotIndex;
-      pane.groupId = getGroupIdByPositionIndex(pane.positionIndex, presetId);
+      pane.groupId = getGroupIdByPositionIndexForGridShape(pane.positionIndex, nextGridShape, presetId);
     }
 
     nextVisible.forEach((pane, index) => {
       pane.state = "visible";
       pane.positionIndex = index;
-      pane.groupId = getGroupIdByPositionIndex(index, presetId);
+      pane.groupId = getGroupIdByPositionIndexForGridShape(index, nextGridShape, presetId);
       if (!pane.sessionId) {
         pane.sessionId = this._createSession(sessionDefaults).id;
       }
     });
 
     this.activeLayout.presetId = presetId;
+    this.activeLayout.layoutVariant = nextLayoutVariant;
+    this.activeLayout.gridShape = nextGridShape;
     this.activeLayout.gridTracks = null;
     return this.snapshotLayout();
   }
 
   saveLayout(options = {}) {
-    const { presetId, panes, gridTracks } = options;
+    const { presetId, panes, layoutVariant, gridShape, gridTracks } = options;
     if (isPresetId(presetId)) {
       this.activeLayout.presetId = presetId;
     }
 
+    this.activeLayout.layoutVariant = normalizeLayoutVariant(
+      layoutVariant || this.activeLayout.layoutVariant,
+      this.activeLayout.presetId,
+      gridShape || this.activeLayout.gridShape,
+    );
+    this.activeLayout.gridShape = getGridShapeForLayoutVariant(
+      this.activeLayout.layoutVariant,
+      this.activeLayout.presetId,
+    );
+
     if (Array.isArray(panes) && panes.length > 0) {
-      this.activeLayout.panes = this._mergePanesFromPayload(panes, this.activeLayout.presetId);
+      this.activeLayout.panes = this._mergePanesFromPayload(
+        panes,
+        this.activeLayout.presetId,
+        this.activeLayout.gridShape,
+      );
     }
 
     this.activeLayout.gridTracks = this._normalizeGridTracks(
       gridTracks,
-      this.activeLayout.presetId,
+      this.activeLayout.gridShape,
     );
 
     return this.snapshotLayout();
@@ -205,7 +382,13 @@ class LayoutManager {
     const presetId = isPresetId(persistedLayout.presetId)
       ? persistedLayout.presetId
       : PRESET_IDS.ONE_BY_TWO;
-    const panes = this._normalizePersistedPanes(persistedLayout.panes, presetId);
+    const layoutVariant = normalizeLayoutVariant(
+      persistedLayout.layoutVariant,
+      presetId,
+      persistedLayout.gridShape,
+    );
+    const gridShape = getGridShapeForLayoutVariant(layoutVariant, presetId);
+    const panes = this._normalizePersistedPanes(persistedLayout.panes, presetId, gridShape);
     const sessionSnapshotById = new Map();
 
     for (const session of persistedLayout.sessions || []) {
@@ -239,12 +422,14 @@ class LayoutManager {
       }
     }
 
-    this._materializeVisiblePanes(panes, presetId);
+    this._materializeVisiblePanes(panes, presetId, gridShape);
 
     this.activeLayout = {
       presetId,
       panes,
-      gridTracks: this._normalizeGridTracks(persistedLayout.gridTracks, presetId),
+      layoutVariant,
+      gridShape,
+      gridTracks: this._normalizeGridTracks(persistedLayout.gridTracks, gridShape),
     };
 
     return {
@@ -258,7 +443,11 @@ class LayoutManager {
       id: createId("pane"),
       slotIndex: index,
       positionIndex: index,
-      groupId: getGroupIdByPositionIndex(index, this.defaultPresetId),
+      groupId: getGroupIdByPositionIndexForGridShape(
+        index,
+        getDefaultGridShapeForPreset(this.defaultPresetId),
+        this.defaultPresetId,
+      ),
       state: "terminated",
       sessionId: null,
     }));
@@ -281,7 +470,7 @@ class LayoutManager {
     return this.sessionManager.createSession(sessionDefaults || {});
   }
 
-  _materializeVisiblePanes(panes, presetId) {
+  _materializeVisiblePanes(panes, presetId, gridShape = getDefaultGridShapeForPreset(presetId)) {
     const preset = getPresetDefinition(presetId);
     const byPosition = (a, b) => a.positionIndex - b.positionIndex;
     const visible = panes.filter((pane) => pane.state === "visible").sort(byPosition);
@@ -310,7 +499,7 @@ class LayoutManager {
       for (const pane of overflow) {
         pane.state = "hidden";
         pane.positionIndex = pane.slotIndex;
-        pane.groupId = getGroupIdByPositionIndex(pane.positionIndex, presetId);
+        pane.groupId = getGroupIdByPositionIndexForGridShape(pane.positionIndex, gridShape, presetId);
       }
     }
 
@@ -320,18 +509,17 @@ class LayoutManager {
 
     finalVisible.forEach((pane, index) => {
       pane.positionIndex = index;
-      pane.groupId = getGroupIdByPositionIndex(index, presetId);
+      pane.groupId = getGroupIdByPositionIndexForGridShape(index, gridShape, presetId);
     });
   }
 
-  _normalizeGridTracks(gridTracks, presetId) {
+  _normalizeGridTracks(gridTracks, gridShape) {
     if (!gridTracks || typeof gridTracks !== "object") {
       return null;
     }
 
-    const preset = getPresetDefinition(presetId);
-    const columns = normalizeTrackSizes(gridTracks.columns, preset.columns);
-    const rows = normalizeTrackSizes(gridTracks.rows, preset.rows);
+    const columns = normalizeTrackSizes(gridTracks.columns, gridShape?.columns);
+    const rows = normalizeTrackSizes(gridTracks.rows, gridShape?.rows);
     if (!columns || !rows) {
       return null;
     }
@@ -339,9 +527,9 @@ class LayoutManager {
     return { columns, rows };
   }
 
-  _mergePanesFromPayload(payloadPanes, presetId) {
+  _mergePanesFromPayload(payloadPanes, presetId, gridShape = getDefaultGridShapeForPreset(presetId)) {
     const existingById = new Map(this.activeLayout.panes.map((pane) => [pane.id, pane]));
-    const merged = this._normalizePersistedPanes(payloadPanes, presetId);
+    const merged = this._normalizePersistedPanes(payloadPanes, presetId, gridShape);
 
     for (const pane of merged) {
       if (pane.sessionId) {
@@ -352,14 +540,18 @@ class LayoutManager {
         pane.sessionId = existing.sessionId;
       }
       if (!pane.groupId || typeof pane.groupId !== "string") {
-        pane.groupId = getGroupIdByPositionIndex(pane.positionIndex, presetId);
+        pane.groupId = getGroupIdByPositionIndexForGridShape(pane.positionIndex, gridShape, presetId);
       }
     }
 
     return merged;
   }
 
-  _normalizePersistedPanes(panes, presetId = this.activeLayout.presetId) {
+  _normalizePersistedPanes(
+    panes,
+    presetId = this.activeLayout.presetId,
+    gridShape = getDefaultGridShapeForPreset(presetId),
+  ) {
     const bySlot = new Map();
 
     panes.forEach((rawPane, index) => {
@@ -387,7 +579,7 @@ class LayoutManager {
         groupId:
           typeof rawPane?.groupId === "string" && rawPane.groupId.length > 0
             ? rawPane.groupId
-            : getGroupIdByPositionIndex(slotIndex, presetId),
+            : getGroupIdByPositionIndexForGridShape(slotIndex, gridShape, presetId),
         state: paneState,
         sessionId: hasSession ? rawPane.sessionId : null,
       });
@@ -399,7 +591,7 @@ class LayoutManager {
           id: createId("pane"),
           slotIndex: slot,
           positionIndex: slot,
-          groupId: getGroupIdByPositionIndex(slot, presetId),
+          groupId: getGroupIdByPositionIndexForGridShape(slot, gridShape, presetId),
           state: "terminated",
           sessionId: null,
         });
@@ -415,14 +607,14 @@ class LayoutManager {
       for (const pane of overflow) {
         pane.state = "hidden";
         pane.positionIndex = pane.slotIndex;
-        pane.groupId = getGroupIdByPositionIndex(pane.positionIndex, presetId);
+        pane.groupId = getGroupIdByPositionIndexForGridShape(pane.positionIndex, gridShape, presetId);
       }
     }
 
     const updatedVisible = normalized.filter((pane) => pane.state === "visible").sort((a, b) => a.positionIndex - b.positionIndex);
     updatedVisible.forEach((pane, index) => {
       pane.positionIndex = index;
-      pane.groupId = getGroupIdByPositionIndex(index, presetId);
+      pane.groupId = getGroupIdByPositionIndexForGridShape(index, gridShape, presetId);
     });
 
     return normalized;
