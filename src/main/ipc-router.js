@@ -10,6 +10,7 @@ const {
   validatePtyKillPayload,
   validatePtyChangeDirectoryPayload,
   validateLayoutSetPresetPayload,
+  validateLayoutSavePayload,
 } = require("./ipc-validators");
 
 const PTY_DATA_FLUSH_INTERVAL_MS = 16;
@@ -235,6 +236,37 @@ function registerIpcRoutes({ ipcMain, sessionManager, layoutStore, getMainWindow
     return {
       ...layout,
       sessionCapabilities: buildSessionCapabilitiesPayload(layout.sessions),
+    };
+  });
+
+  ipcMain.handle(IPC_CHANNELS.LAYOUT_SAVE, (event, payload = {}) => {
+    if (!isTrustedRendererEvent(event)) {
+      throw new Error("forbidden");
+    }
+    const validated = validateLayoutSavePayload(payload);
+    if (!validated.ok) {
+      throw new Error(validated.error);
+    }
+    if (!isPresetId(validated.value.presetId)) {
+      throw new Error(`Unsupported preset: ${validated.value.presetId}`);
+    }
+
+    const layout = layoutManager.saveLayout({
+      presetId: validated.value.presetId,
+      panes: validated.value.panes,
+      layoutVariant: validated.value.layoutVariant,
+      gridShape: validated.value.gridShape,
+      gridTracks: validated.value.gridTracks,
+    });
+    layoutStore.save(layout);
+    return {
+      ok: true,
+      gridShape: layout.gridShape,
+      gridTracks: layout.gridTracks,
+      layout: {
+        ...layout,
+        sessionCapabilities: buildSessionCapabilitiesPayload(layout.sessions),
+      },
     };
   });
 

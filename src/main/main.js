@@ -1,6 +1,5 @@
 const path = require("path");
 const fs = require("fs");
-const crypto = require("crypto");
 const os = require("os");
 const { TextDecoder } = require("util");
 const { pathToFileURL } = require("url");
@@ -26,7 +25,6 @@ const {
   validateSkillNamePayload,
   validateClipboardWritePayload,
   validateNotificationPayload,
-  validateAgentsPolicyWritePayload,
 } = require("./ipc-validators");
 
 const sessionManager = new SessionManager();
@@ -184,7 +182,16 @@ const NODE_RECOMMENDED_VERSION = "20.19.0";
 const NODE_INSTALL_PAGE_URL = "https://nodejs.org/en/download";
 const CLIPBOARD_RATE_LIMIT_WINDOW_MS = 10_000;
 const CLIPBOARD_RATE_LIMIT_MAX_CALLS = 40;
+const DETACHED_CHILD_RELAUNCH_DELAY_MS = 1500;
+const RESTART_AWARE_CLEANUP_REASONS = new Set([
+  "window-close-request",
+  "window-close",
+  "window-closed",
+  "app-before-quit",
+  "app-will-quit",
+]);
 let hasWindowCloseCleanupRun = false;
+let hasDetachedChildRelaunchRun = false;
 const isProductionBuild = () =>
   app.isPackaged || String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const SHOULD_AUTO_OPEN_DEVTOOLS =
@@ -276,6 +283,7 @@ function showDesktopNotification(payload = {}) {
 }
 
 function cleanupSessions(reason) {
+  maybeScheduleDetachedVibeTerminalRelaunch(reason);
   sessionManager.cleanupAll(reason);
 }
 
@@ -285,6 +293,234 @@ function cleanupSessionsOnce(reason) {
   }
   cleanupSessions(reason);
   hasWindowCloseCleanupRun = true;
+}
+
+function shouldHandleRestartAwareCleanup(reason) {
+  const normalized = String(reason || "").trim().toLowerCase();
+  return RESTART_AWARE_CLEANUP_REASONS.has(normalized);
+}
+
+function normalizeDetachedProcessName(value) {
+  const normalized = String(value || "").trim().replace(/\\/g, "/");
+  if (!normalized) {
+    return "";
+  }
+  const basename = path.basename(normalized) || normalized;
+  return basename
+    .replace(/\.app$/i, "")
+    .replace(/\.exe$/i, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function isVibeTerminalProcessCandidate(value) {
+  const normalized = normalizeDetachedProcessName(value);
+  return normalized === "vibe terminal" || normalized === "vibeterminal";
+}
+
+function parseUnixProcessTable(rawText) {
+  const rows = [];
+  for (const line of String(rawText || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+    if (!match) {
+      continue;
+    }
+
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const executablePath = String(match[3] || "").trim();
+    if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(ppid) || ppid < 0 || !executablePath) {
+      continue;
+    }
+    rows.push({
+      pid,
+      ppid,
+      executablePath,
+      name: path.basename(executablePath),
+    });
+  }
+  return rows;
+}
+
+function parseWindowsProcessTable(rawText) {
+  const trimmed = String(rawText || "").trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (_error) {
+    return [];
+  }
+
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  return rows
+    .map((entry) => {
+      const pid = Number(entry?.ProcessId);
+      const ppid = Number(entry?.ParentProcessId);
+      const executablePath = String(entry?.ExecutablePath || "").trim();
+      const name = String(entry?.Name || "").trim();
+      if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(ppid) || ppid < 0) {
+        return null;
+      }
+      return {
+        pid,
+        ppid,
+        executablePath,
+        name,
+      };
+    })
+    .filter(Boolean);
+}
+
+function readProcessTable() {
+  if (process.platform === "win32") {
+    const powerShellPath = getWindowsPowerShellLocation() || getPwshExecutableName() || "powershell.exe";
+    const result = spawnSync(
+      powerShellPath,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath | ConvertTo-Json -Compress",
+      ],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    if (result.error || result.status !== 0) {
+      return [];
+    }
+    return parseWindowsProcessTable(result.stdout);
+  }
+
+  const result = spawnSync("ps", ["-axo", "pid=,ppid=,comm="], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    return [];
+  }
+  return parseUnixProcessTable(result.stdout);
+}
+
+function collectDescendantProcesses(processEntries, roots) {
+  const childrenByParentPid = new Map();
+  for (const processEntry of processEntries || []) {
+    const parentPid = Number(processEntry?.ppid);
+    if (!Number.isFinite(parentPid) || parentPid < 0) {
+      continue;
+    }
+    const current = childrenByParentPid.get(parentPid) || [];
+    current.push(processEntry);
+    childrenByParentPid.set(parentPid, current);
+  }
+
+  const descendants = [];
+  const visitedPids = new Set();
+  const queue = Array.isArray(roots)
+    ? roots
+      .map((root) => ({
+        root,
+        pid: Number(root?.pid),
+      }))
+      .filter((entry) => Number.isFinite(entry.pid) && entry.pid > 0)
+    : [];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+    const childEntries = childrenByParentPid.get(current.pid) || [];
+    for (const childEntry of childEntries) {
+      const childPid = Number(childEntry?.pid);
+      if (!Number.isFinite(childPid) || childPid <= 0 || visitedPids.has(childPid)) {
+        continue;
+      }
+      visitedPids.add(childPid);
+      descendants.push({
+        root: current.root,
+        process: childEntry,
+      });
+      queue.push({
+        root: current.root,
+        pid: childPid,
+      });
+    }
+  }
+
+  return descendants;
+}
+
+function collectDetachedVibeTerminalLaunches() {
+  const roots = sessionManager.snapshotActiveClientRoots();
+  if (!Array.isArray(roots) || roots.length === 0) {
+    return [];
+  }
+
+  const processEntries = readProcessTable();
+  if (!Array.isArray(processEntries) || processEntries.length === 0) {
+    return [];
+  }
+
+  const descendants = collectDescendantProcesses(processEntries, roots);
+  const deduped = new Map();
+  for (const entry of descendants) {
+    const executablePath = String(entry?.process?.executablePath || "").trim();
+    const processName = String(entry?.process?.name || "").trim();
+    if (!isVibeTerminalProcessCandidate(executablePath) && !isVibeTerminalProcessCandidate(processName)) {
+      continue;
+    }
+
+    const command = executablePath || processName;
+    if (!command) {
+      continue;
+    }
+
+    const cwd = String(entry?.root?.cwd || "").trim()
+      || (path.isAbsolute(command) ? path.dirname(command) : app.getPath("home"));
+    const key = `${command}\u0000${cwd}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, {
+        command,
+        args: [],
+        cwd,
+      });
+    }
+  }
+
+  return [...deduped.values()];
+}
+
+function maybeScheduleDetachedVibeTerminalRelaunch(reason) {
+  if (!shouldHandleRestartAwareCleanup(reason) || hasDetachedChildRelaunchRun) {
+    return;
+  }
+
+  hasDetachedChildRelaunchRun = true;
+  const relaunchTargets = collectDetachedVibeTerminalLaunches();
+  for (const target of relaunchTargets) {
+    spawnDetachedCommandLater(target.command, target.args, {
+      cwd: target.cwd,
+      delayMs: DETACHED_CHILD_RELAUNCH_DELAY_MS,
+    })
+      .then((result) => {
+        if (result?.ok === false) {
+          console.warn(
+            `[restart-preserve] failed to relaunch ${target.command}: ${String(result.error || "unknown")}`,
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn(`[restart-preserve] failed to relaunch ${target.command}: ${String(error)}`);
+      });
+  }
 }
 
 function emitWindowState(window) {
@@ -544,6 +780,112 @@ function isExecutableAvailable(commandName) {
     return false;
   }
   return getCommandLocations(commandName.trim()).length > 0;
+}
+
+function getFirstCommandLocation(commandNames) {
+  for (const commandName of commandNames || []) {
+    const locations = getCommandLocations(commandName);
+    if (locations.length > 0) {
+      return locations[0];
+    }
+  }
+  return "";
+}
+
+function getWindowsPowerShellLocation() {
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  const staticCandidates = [
+    path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    path.join(systemRoot, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  ];
+  for (const candidate of staticCandidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return getFirstCommandLocation(["powershell.exe"]);
+}
+
+function getCmdLocation() {
+  const comSpec = String(process.env.ComSpec || "").trim();
+  if (comSpec) {
+    return comSpec;
+  }
+  return getFirstCommandLocation(["cmd.exe", "cmd"]);
+}
+
+function buildTerminalProfiles() {
+  const profiles = [];
+  const seenShells = new Set();
+  const pushProfile = (profile) => {
+    const shell = String(profile?.shell || "").trim();
+    if (!shell) {
+      return;
+    }
+    const key = process.platform === "win32" ? shell.toLowerCase() : shell;
+    if (seenShells.has(key)) {
+      return;
+    }
+    seenShells.add(key);
+    profiles.push({
+      id: String(profile.id || "").trim(),
+      label: String(profile.label || "").trim(),
+      shell,
+      description: String(profile.description || "").trim(),
+      isDefault: Boolean(profile.isDefault),
+    });
+  };
+
+  const defaultShell = getDefaultShell();
+  pushProfile({
+    id: "default",
+    label: "기본 셸",
+    shell: defaultShell,
+    description: `기본 실행 셸 (${path.basename(defaultShell) || defaultShell})`,
+    isDefault: true,
+  });
+
+  if (process.platform === "win32") {
+    pushProfile({
+      id: "pwsh",
+      label: "PowerShell 7",
+      shell: getFirstCommandLocation(["pwsh.exe", "pwsh"]) || defaultShell,
+      description: "권장 Windows 셸",
+    });
+    pushProfile({
+      id: "powershell",
+      label: "Windows PowerShell",
+      shell: getWindowsPowerShellLocation(),
+      description: "기본 제공 PowerShell 5.1",
+    });
+    pushProfile({
+      id: "cmd",
+      label: "Command Prompt",
+      shell: getCmdLocation(),
+      description: "기본 CMD 셸",
+    });
+    pushProfile({
+      id: "wsl",
+      label: "WSL",
+      shell: getFirstCommandLocation(["wsl.exe", "wsl"]),
+      description: "기본 WSL 배포판 셸",
+    });
+    return profiles;
+  }
+
+  for (const profile of [
+    { id: "zsh", label: "Zsh", commandNames: ["zsh"], description: "Z shell" },
+    { id: "bash", label: "Bash", commandNames: ["bash"], description: "GNU Bash" },
+    { id: "fish", label: "Fish", commandNames: ["fish"], description: "Friendly interactive shell" },
+  ]) {
+    pushProfile({
+      id: profile.id,
+      label: profile.label,
+      shell: getFirstCommandLocation(profile.commandNames),
+      description: profile.description,
+    });
+  }
+  return profiles;
 }
 
 function resolveNpmCommand() {
@@ -1407,49 +1749,6 @@ function openNodeInstallPage() {
   }
 }
 
-async function openPathInWindowsEditorFallback(filePath) {
-  const normalizedFilePath = String(filePath || "").trim();
-  if (!normalizedFilePath) {
-    return { ok: false, error: "invalid-path" };
-  }
-
-  const preferredEditorIds = ["cursor", "vscode", "windsurf"];
-  let lastError = "editor-launch-command-not-found";
-  for (const editorId of preferredEditorIds) {
-    const editor = KNOWN_EDITORS.find((item) => item.id === editorId);
-    if (!editor) {
-      continue;
-    }
-    const launch = resolveEditorLaunchCommand(editor);
-    if (!launch) {
-      continue;
-    }
-    const result = await spawnDetachedCommand(
-      launch.command,
-      [...launch.args, normalizedFilePath],
-      { cwd: path.dirname(normalizedFilePath) },
-    );
-    if (result.ok) {
-      return { ok: true, editorId };
-    }
-    lastError = result.error || lastError;
-  }
-
-  const notepadResult = await spawnDetachedCommand(
-    "notepad.exe",
-    [normalizedFilePath],
-    { cwd: path.dirname(normalizedFilePath) },
-  );
-  if (notepadResult.ok) {
-    return { ok: true, editorId: "notepad" };
-  }
-
-  return {
-    ok: false,
-    error: notepadResult.error || lastError,
-  };
-}
-
 
 function getWindowsProgramsDir() {
   const localAppData = String(process.env.LOCALAPPDATA || "").trim();
@@ -1951,6 +2250,49 @@ function spawnDetachedCommand(command, args = [], options = {}) {
       });
     }
   });
+}
+
+function quotePowerShellLiteral(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function spawnDetachedCommandLater(command, args = [], options = {}) {
+  const commandText = String(command || "").trim();
+  if (!commandText) {
+    return Promise.resolve({ ok: false, error: "launch-command-not-found" });
+  }
+
+  const launchArgs = Array.isArray(args)
+    ? args.map((arg) => String(arg ?? ""))
+    : [];
+  const launchCwd = String(options.cwd || "").trim() || app.getPath("home");
+  const delayMs = Number.isFinite(options.delayMs)
+    ? Math.max(0, Math.floor(options.delayMs))
+    : DETACHED_CHILD_RELAUNCH_DELAY_MS;
+
+  if (process.platform === "win32") {
+    const argListLiteral = launchArgs.length > 0
+      ? ` -ArgumentList @(${launchArgs.map((arg) => quotePowerShellLiteral(arg)).join(", ")})`
+      : "";
+    const powerShellScript = [
+      `Start-Sleep -Milliseconds ${delayMs};`,
+      `Start-Process -FilePath ${quotePowerShellLiteral(commandText)}`,
+      `-WorkingDirectory ${quotePowerShellLiteral(launchCwd)}${argListLiteral};`,
+    ].join(" ");
+    const powerShellPath = getWindowsPowerShellLocation() || getPwshExecutableName() || "powershell.exe";
+    return spawnDetachedCommand(
+      powerShellPath,
+      ["-NoLogo", "-NoProfile", "-Command", powerShellScript],
+      { cwd: launchCwd },
+    );
+  }
+
+  const delaySeconds = Math.max(1, Math.ceil(delayMs / 1000));
+  return spawnDetachedCommand(
+    "/bin/sh",
+    ["-lc", `sleep ${delaySeconds}; exec "$@"`, "_", commandText, ...launchArgs],
+    { cwd: launchCwd },
+  );
 }
 
 async function queryInstalledEditors() {
@@ -3715,12 +4057,11 @@ function createRendererHotReload(window) {
 
 function createMainWindow() {
   hasWindowCloseCleanupRun = false;
+  hasDetachedChildRelaunchRun = false;
 
   const windowOptions = {
     width: 1400,
     height: 1000,
-    minWidth: 1400,
-    minHeight: 600,
     title: "Vibe Terminal",
     frame: false,
     autoHideMenuBar: true,
@@ -4134,6 +4475,28 @@ app.whenReady().then(() => {
     return queryTerminalColorDiagnostics();
   });
 
+  ipcMain.handle(IPC_CHANNELS.APP_QUERY_TERMINAL_PROFILES, (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        profiles: [],
+        error: "forbidden",
+      };
+    }
+    try {
+      return {
+        ok: true,
+        profiles: buildTerminalProfiles(),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        profiles: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
   ipcMain.handle(IPC_CHANNELS.APP_CODEX_MODEL_CATALOG, async (event) => {
     if (!isTrustedRendererEvent(event)) {
       return {
@@ -4229,272 +4592,6 @@ app.whenReady().then(() => {
       return { ok: false, error: "invalid-editor-id" };
     }
     return openInEditor(editorId, cwd);
-  });
-
-  function resolveAgentsPolicyPath() {
-    return path.join(app.getPath("userData"), "AGENTS.md");
-  }
-
-  function shouldUseDirectSourceAgentsPolicy() {
-    return !app.isPackaged;
-  }
-
-  function resolveAgentsPolicySourcePath() {
-    const candidates = [];
-
-    // Packaged apps should prefer the resource copy shipped via electron-builder extraResources.
-    if (app.isPackaged && typeof process.resourcesPath === "string" && process.resourcesPath.trim()) {
-      candidates.push(path.join(process.resourcesPath, "AGENTS.md"));
-    }
-
-    candidates.push(path.join(app.getAppPath(), "AGENTS.md"));
-    candidates.push(path.join(process.cwd(), "AGENTS.md"));
-
-    for (const candidatePath of candidates) {
-      if (typeof candidatePath !== "string" || !candidatePath) {
-        continue;
-      }
-      if (fs.existsSync(candidatePath)) {
-        return candidatePath;
-      }
-    }
-
-    return "";
-  }
-
-  function readAgentsPolicySourceContent() {
-    const sourcePath = resolveAgentsPolicySourcePath();
-    if (!sourcePath) {
-      return "";
-    }
-    try {
-      return fs.readFileSync(sourcePath, "utf-8");
-    } catch (_error) {
-      return "";
-    }
-  }
-
-  function computeTextHash(value) {
-    return crypto.createHash("sha256").update(String(value || ""), "utf-8").digest("hex");
-  }
-
-  function resolveAgentsPolicySyncMetaPath(userDataPolicyPath) {
-    return path.join(path.dirname(userDataPolicyPath), "AGENTS.sync.json");
-  }
-
-  function readAgentsPolicySyncMeta(metaPath) {
-    if (!metaPath || !fs.existsSync(metaPath)) {
-      return null;
-    }
-    try {
-      const raw = fs.readFileSync(metaPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      const sourceHash = typeof parsed?.sourceHash === "string" ? parsed.sourceHash.trim() : "";
-      const userHash = typeof parsed?.userHash === "string" ? parsed.userHash.trim() : "";
-      const autoSyncEligible = typeof parsed?.autoSyncEligible === "boolean" ? parsed.autoSyncEligible : null;
-      if (!sourceHash || !userHash || autoSyncEligible === null) {
-        return null;
-      }
-      return { sourceHash, userHash, autoSyncEligible };
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function writeAgentsPolicySyncMeta(metaPath, meta) {
-    if (!metaPath || !meta) {
-      return;
-    }
-    try {
-      fs.writeFileSync(
-        metaPath,
-        JSON.stringify(
-          {
-            sourceHash: meta.sourceHash,
-            userHash: meta.userHash,
-            autoSyncEligible: Boolean(meta.autoSyncEligible),
-            updatedAt: new Date().toISOString(),
-          },
-          null,
-          2,
-        ),
-        "utf-8",
-      );
-    } catch (_error) {
-      // Ignore metadata sync failures; AGENTS.md remains the source of truth.
-    }
-  }
-
-  function prepareAgentsPolicyPath() {
-    if (shouldUseDirectSourceAgentsPolicy()) {
-      const sourcePath = resolveAgentsPolicySourcePath();
-      if (sourcePath) {
-        return sourcePath;
-      }
-    }
-
-    const userDataPolicyPath = resolveAgentsPolicyPath();
-    const userDataDir = path.dirname(userDataPolicyPath);
-
-    if (!fs.existsSync(userDataDir)) {
-      fs.mkdirSync(userDataDir, { recursive: true });
-    }
-
-    const sourceContent = readAgentsPolicySourceContent();
-    const sourceHash = computeTextHash(sourceContent);
-    const syncMetaPath = resolveAgentsPolicySyncMetaPath(userDataPolicyPath);
-
-    if (!fs.existsSync(userDataPolicyPath)) {
-      fs.writeFileSync(userDataPolicyPath, sourceContent, "utf-8");
-      writeAgentsPolicySyncMeta(syncMetaPath, {
-        sourceHash,
-        userHash: computeTextHash(sourceContent),
-        autoSyncEligible: true,
-      });
-      return userDataPolicyPath;
-    }
-
-    const userContent = fs.readFileSync(userDataPolicyPath, "utf-8");
-    const userHash = computeTextHash(userContent);
-    const syncMeta = readAgentsPolicySyncMeta(syncMetaPath);
-
-    const canAutoSyncFromSource = Boolean(
-      syncMeta
-      && syncMeta.autoSyncEligible
-      && syncMeta.userHash === userHash
-      && syncMeta.sourceHash !== sourceHash,
-    );
-
-    if (canAutoSyncFromSource) {
-      fs.writeFileSync(userDataPolicyPath, sourceContent, "utf-8");
-      writeAgentsPolicySyncMeta(syncMetaPath, {
-        sourceHash,
-        userHash: computeTextHash(sourceContent),
-        autoSyncEligible: true,
-      });
-      return userDataPolicyPath;
-    }
-
-    const inferredAutoSyncEligible = userHash === sourceHash
-      ? true
-      : Boolean(syncMeta && syncMeta.autoSyncEligible && syncMeta.userHash === userHash);
-    const shouldRefreshMeta = !syncMeta
-      || syncMeta.sourceHash !== sourceHash
-      || syncMeta.userHash !== userHash
-      || syncMeta.autoSyncEligible !== inferredAutoSyncEligible;
-    if (shouldRefreshMeta) {
-      writeAgentsPolicySyncMeta(syncMetaPath, {
-        sourceHash,
-        userHash,
-        autoSyncEligible: inferredAutoSyncEligible,
-      });
-    }
-
-    return userDataPolicyPath;
-  }
-
-  function getFileMtimeMs(filePath) {
-    try {
-      const stat = fs.statSync(filePath);
-      return Number.isFinite(stat?.mtimeMs) ? stat.mtimeMs : 0;
-    } catch (_error) {
-      return 0;
-    }
-  }
-
-  ipcMain.handle(IPC_CHANNELS.APP_READ_AGENTS_POLICY, (event) => {
-    if (!isTrustedRendererEvent(event)) {
-      return { ok: false, error: "forbidden" };
-    }
-    try {
-      const userDataPolicyPath = prepareAgentsPolicyPath();
-      if (fs.existsSync(userDataPolicyPath)) {
-        return {
-          ok: true,
-          content: fs.readFileSync(userDataPolicyPath, "utf-8"),
-          path: userDataPolicyPath,
-          mtimeMs: getFileMtimeMs(userDataPolicyPath),
-        };
-      }
-      return { ok: true, content: null };
-    } catch (error) {
-      return { ok: false, error: String(error) };
-    }
-  });
-
-  ipcMain.handle(IPC_CHANNELS.APP_WRITE_AGENTS_POLICY, (event, payload = {}) => {
-    if (!isTrustedRendererEvent(event)) {
-      return { ok: false, error: "forbidden" };
-    }
-    const validated = validateAgentsPolicyWritePayload(payload);
-    if (!validated.ok) {
-      return { ok: false, error: validated.error };
-    }
-    try {
-      const userDataPolicyPath = prepareAgentsPolicyPath();
-      const currentMtimeMs = getFileMtimeMs(userDataPolicyPath);
-      const hasBaseMtime = Number.isFinite(validated.value.baseMtimeMs);
-      if (
-        hasBaseMtime
-        && !validated.value.ignoreStale
-        && Math.abs(currentMtimeMs - validated.value.baseMtimeMs) > 1
-      ) {
-        return {
-          ok: false,
-          error: "stale-version",
-          path: userDataPolicyPath,
-          currentMtimeMs,
-        };
-      }
-      fs.writeFileSync(userDataPolicyPath, validated.value.content, "utf-8");
-      if (app.isPackaged) {
-        const sourceHash = computeTextHash(readAgentsPolicySourceContent());
-        const userHash = computeTextHash(validated.value.content);
-        writeAgentsPolicySyncMeta(resolveAgentsPolicySyncMetaPath(userDataPolicyPath), {
-          sourceHash,
-          userHash,
-          autoSyncEligible: userHash === sourceHash,
-        });
-      }
-      return {
-        ok: true,
-        path: userDataPolicyPath,
-        mtimeMs: getFileMtimeMs(userDataPolicyPath),
-      };
-    } catch (error) {
-      return { ok: false, error: String(error) };
-    }
-  });
-
-  ipcMain.handle(IPC_CHANNELS.APP_EDIT_AGENTS_POLICY, async (event) => {
-    if (!isTrustedRendererEvent(event)) {
-      return { ok: false, error: "forbidden" };
-    }
-    try {
-      const userDataPolicyPath = prepareAgentsPolicyPath();
-      if (fs.existsSync(userDataPolicyPath)) {
-        const defaultOpenError = await shell.openPath(userDataPolicyPath);
-        if (!defaultOpenError) {
-          return { ok: true };
-        }
-
-        if (process.platform === "win32") {
-          const fallback = await openPathInWindowsEditorFallback(userDataPolicyPath);
-          if (fallback.ok) {
-            return { ok: true, openedBy: fallback.editorId || "fallback" };
-          }
-          return {
-            ok: false,
-            error: `default-open-failed:${defaultOpenError}; fallback-failed:${fallback.error || "unknown"}`,
-          };
-        }
-
-        return { ok: false, error: defaultOpenError };
-      }
-      return { ok: false, error: "AGENTS.md not found." };
-    } catch (error) {
-      return { ok: false, error: String(error) };
-    }
   });
 
   const layoutStore = new LayoutStore(path.join(app.getPath("userData"), "state"));

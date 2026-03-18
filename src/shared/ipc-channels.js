@@ -10,6 +10,7 @@ const IPC_CHANNELS = Object.freeze({
   PTY_STATUS: "pty:status",
 
   LAYOUT_SET_PRESET: "layout:setPreset",
+  LAYOUT_SAVE: "layout:save",
   LAYOUT_RESTORE: "layout:restore",
 
   APP_RENDERER_UNLOADING: "app:renderer-unloading",
@@ -32,6 +33,7 @@ const IPC_CHANNELS = Object.freeze({
   APP_NODE_RUNTIME_STATUS: "app:node-runtime-status",
   APP_NODE_RUNTIME_INSTALL: "app:node-runtime-install",
   APP_TERMINAL_COLOR_DIAGNOSTICS: "app:terminal-color-diagnostics",
+  APP_QUERY_TERMINAL_PROFILES: "app:query-terminal-profiles",
   APP_CODEX_MODEL_CATALOG: "app:codex-model-catalog",
   APP_GEMINI_MODEL_CATALOG: "app:gemini-model-catalog",
   APP_CLIPBOARD_READ: "app:clipboard-read",
@@ -40,9 +42,6 @@ const IPC_CHANNELS = Object.freeze({
   APP_SHOW_NOTIFICATION: "app:show-notification",
   APP_QUERY_EDITORS: "app:query-editors",
   APP_OPEN_IN_EDITOR: "app:open-in-editor",
-  APP_READ_AGENTS_POLICY: "app:read-agents-policy",
-  APP_WRITE_AGENTS_POLICY: "app:write-agents-policy",
-  APP_EDIT_AGENTS_POLICY: "app:edit-agents-policy",
 });
 
 module.exports = {

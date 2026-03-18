@@ -11,6 +11,7 @@ const IPC_CHANNELS = Object.freeze({
   PTY_EXIT: "pty:exit",
   PTY_STATUS: "pty:status",
   LAYOUT_SET_PRESET: "layout:setPreset",
+  LAYOUT_SAVE: "layout:save",
   LAYOUT_RESTORE: "layout:restore",
   APP_RENDERER_UNLOADING: "app:renderer-unloading",
   APP_WINDOW_MINIMIZE: "app:window-minimize",
@@ -32,6 +33,7 @@ const IPC_CHANNELS = Object.freeze({
   APP_NODE_RUNTIME_STATUS: "app:node-runtime-status",
   APP_NODE_RUNTIME_INSTALL: "app:node-runtime-install",
   APP_TERMINAL_COLOR_DIAGNOSTICS: "app:terminal-color-diagnostics",
+  APP_QUERY_TERMINAL_PROFILES: "app:query-terminal-profiles",
   APP_CODEX_MODEL_CATALOG: "app:codex-model-catalog",
   APP_GEMINI_MODEL_CATALOG: "app:gemini-model-catalog",
   APP_CLIPBOARD_READ: "app:clipboard-read",
@@ -40,9 +42,6 @@ const IPC_CHANNELS = Object.freeze({
   APP_SHOW_NOTIFICATION: "app:show-notification",
   APP_QUERY_EDITORS: "app:query-editors",
   APP_OPEN_IN_EDITOR: "app:open-in-editor",
-  APP_READ_AGENTS_POLICY: "app:read-agents-policy",
-  APP_WRITE_AGENTS_POLICY: "app:write-agents-policy",
-  APP_EDIT_AGENTS_POLICY: "app:edit-agents-policy",
 });
 
 function subscribe(channel, listener) {
@@ -102,14 +101,12 @@ const appApi = Object.freeze({
     installNodeRuntime: () => ipcRenderer.invoke(IPC_CHANNELS.APP_NODE_RUNTIME_INSTALL),
     queryTerminalColorDiagnostics: () =>
       ipcRenderer.invoke(IPC_CHANNELS.APP_TERMINAL_COLOR_DIAGNOSTICS),
+    queryTerminalProfiles: () => ipcRenderer.invoke(IPC_CHANNELS.APP_QUERY_TERMINAL_PROFILES),
     queryCodexModelCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.APP_CODEX_MODEL_CATALOG),
     queryGeminiModelCatalog: () => ipcRenderer.invoke(IPC_CHANNELS.APP_GEMINI_MODEL_CATALOG),
     showNotification: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_SHOW_NOTIFICATION, payload),
     queryEditors: () => ipcRenderer.invoke(IPC_CHANNELS.APP_QUERY_EDITORS),
     openInEditor: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_OPEN_IN_EDITOR, payload),
-    readAgentsPolicy: () => ipcRenderer.invoke(IPC_CHANNELS.APP_READ_AGENTS_POLICY),
-    writeAgentsPolicy: (payload) => ipcRenderer.invoke(IPC_CHANNELS.APP_WRITE_AGENTS_POLICY, payload),
-    editAgentsPolicy: () => ipcRenderer.invoke(IPC_CHANNELS.APP_EDIT_AGENTS_POLICY),
   }),
 });
 
@@ -129,6 +126,7 @@ contextBridge.exposeInMainWorld(
     }),
     layout: Object.freeze({
       setPreset: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LAYOUT_SET_PRESET, payload),
+      save: (payload) => ipcRenderer.invoke(IPC_CHANNELS.LAYOUT_SAVE, payload),
       restore: () => ipcRenderer.invoke(IPC_CHANNELS.LAYOUT_RESTORE),
     }),
     app: Object.freeze({
@@ -158,14 +156,12 @@ contextBridge.exposeInMainWorld(
       checkNodeRuntimeStatus: () => appApi.process.checkNodeRuntimeStatus(),
       installNodeRuntime: () => appApi.process.installNodeRuntime(),
       queryTerminalColorDiagnostics: () => appApi.process.queryTerminalColorDiagnostics(),
+      queryTerminalProfiles: () => appApi.process.queryTerminalProfiles(),
       queryCodexModelCatalog: () => appApi.process.queryCodexModelCatalog(),
       queryGeminiModelCatalog: () => appApi.process.queryGeminiModelCatalog(),
       showNotification: (payload) => appApi.process.showNotification(payload),
       queryEditors: () => appApi.process.queryEditors(),
       openInEditor: (payload) => appApi.process.openInEditor(payload),
-      readAgentsPolicy: () => appApi.process.readAgentsPolicy(),
-      writeAgentsPolicy: (payload) => appApi.process.writeAgentsPolicy(payload),
-      editAgentsPolicy: () => appApi.process.editAgentsPolicy(),
       readClipboardText: () => appApi.read.clipboardText(),
       readClipboardImageToTemp: () => appApi.read.clipboardImageToTemp(),
       writeClipboardText: (text) => appApi.write.clipboardText(text),

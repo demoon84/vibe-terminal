@@ -16,18 +16,14 @@
 <body>
   <header class="window-titlebar">
     <div id="window-drag-region" class="window-drag-region">
-      <span class="titlebar-app-name">
-        <img class="titlebar-app-icon" src="./app-icon.png" alt="" aria-hidden="true" />
-        <span class="titlebar-app-text">Vibe Terminal</span>
-      </span>
+
       <div class="titlebar-preset-group">
         <!-- Layout Segment -->
         <div class="titlebar-segment">
           <button data-preset-button="1x1">1분할</button>
           <button data-preset-button="1x2">2분할</button>
+          <button data-preset-button="1x3">3분할</button>
           <button data-preset-button="1x4">4분할</button>
-          <button data-preset-button="2x6">6분할</button>
-          <button data-preset-button="2x8">8분할</button>
         </div>
 
         <!-- Agent Segment -->
@@ -40,7 +36,6 @@
         <!-- Utils Segment -->
         <div class="titlebar-segment">
           <button id="titlebar-skill-manager-btn" class="titlebar-path-setting-btn" type="button">스킬관리</button>
-          <button id="titlebar-edit-agents-btn" class="titlebar-path-setting-btn" type="button">규칙설정</button>
           <button id="titlebar-path-setting-btn" class="titlebar-path-setting-btn" type="button">경로설정</button>
           <button id="titlebar-font-setting-btn" class="titlebar-path-setting-btn" type="button">폰트</button>
         </div>
@@ -112,25 +107,6 @@
           <h3>추천</h3>
         </div>
         <div id="skill-manager-recommended-list" class="skill-manager-grid"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="agents-policy-overlay" class="agent-install-overlay" aria-hidden="true">
-    <div class="agent-install-card agents-policy-card" role="dialog" aria-modal="true"
-      aria-labelledby="agents-policy-title">
-      <button id="agents-policy-cancel-btn" class="agent-install-close-btn" type="button" aria-label="닫기">
-        <span class="wc-icon wc-icon-close" aria-hidden="true"></span>
-      </button>
-      <h2 id="agents-policy-title">규칙 설정 (AGENTS.md)</h2>
-      <p class="agent-install-message">앱 전용 AGENTS.md를 직접 수정합니다. 저장 후 새 세션부터 규칙이 반영됩니다.</p>
-      <p id="agents-policy-path" class="agents-policy-path">경로: -</p>
-      <textarea id="agents-policy-editor" class="agents-policy-editor" spellcheck="false"
-        placeholder="규칙 내용을 입력하세요"></textarea>
-      <div class="agents-policy-actions">
-        <button id="agents-policy-open-editor-btn" class="agents-policy-action-btn" type="button">외부 편집기</button>
-        <button id="agents-policy-reload-btn" class="agents-policy-action-btn" type="button">다시불러오기</button>
-        <button id="agents-policy-save-btn" class="agents-policy-action-btn primary" type="button">저장</button>
       </div>
     </div>
   </div>

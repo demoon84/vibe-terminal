@@ -114,6 +114,16 @@ function isCmdShell(shell) {
   );
 }
 
+function isWslShell(shell) {
+  const normalized = String(shell || "").toLowerCase();
+  return (
+    normalized === "wsl" ||
+    normalized === "wsl.exe" ||
+    normalized.endsWith("\\wsl.exe") ||
+    normalized.endsWith("/wsl.exe")
+  );
+}
+
 function quotePowerShellPath(value) {
   return `'${String(value || "").replace(/'/g, "''")}'`;
 }
@@ -124,6 +134,9 @@ function quotePosixPath(value) {
 
 function buildChangeDirectoryCommand(shell, cwd) {
   if (process.platform === "win32") {
+    if (isWslShell(shell)) {
+      return `cd "$(wslpath ${quotePosixPath(cwd)})"\r`;
+    }
     if (isPowerShellShell(shell)) {
       return `Set-Location -LiteralPath ${quotePowerShellPath(cwd)}\r`;
     }
@@ -289,9 +302,8 @@ class SessionManager extends EventEmitter {
     const id = options.sessionId || createId("session");
     const cwd = options.cwd || process.cwd();
     const requestedShellRaw = typeof options.shell === "string" ? options.shell.trim() : "";
-    const requestedShell = process.platform === "win32" ? "" : requestedShellRaw;
     const defaultShell = getDefaultShell();
-    const shell = requestedShell || defaultShell;
+    const shell = requestedShellRaw || defaultShell;
     const env = clonePlainObject(options.env || {});
     const cols = Number.isFinite(options.cols) ? Math.max(2, options.cols) : 80;
     const rows = Number.isFinite(options.rows) ? Math.max(1, options.rows) : 24;
@@ -507,6 +519,25 @@ class SessionManager extends EventEmitter {
       killed: clientKilled,
       reason,
     };
+  }
+
+  snapshotActiveClientRoots() {
+    const roots = [];
+    for (const [sessionId, runtime] of this.clients.entries()) {
+      const pid = Number(runtime?.client?.pid);
+      if (!Number.isFinite(pid) || pid <= 0) {
+        continue;
+      }
+
+      const session = this.sessions.get(sessionId);
+      roots.push({
+        sessionId,
+        pid,
+        cwd: typeof session?.cwd === "string" ? session.cwd : "",
+        shell: typeof session?.shell === "string" ? session.shell : "",
+      });
+    }
+    return roots;
   }
 
   cleanupAll(reason = "cleanup") {

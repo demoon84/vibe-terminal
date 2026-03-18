@@ -15,10 +15,8 @@ const SESSION_STATUS = Object.freeze({
 const PRESET_IDS = Object.freeze({
   ONE_BY_ONE: "1x1",
   ONE_BY_TWO: "1x2",
+  ONE_BY_THREE: "1x3",
   ONE_BY_FOUR: "1x4",
-  TWO_BY_SIX: "2x6",
-  TWO_BY_EIGHT: "2x8",
-
 });
 
 const PRESET_DEFINITIONS = Object.freeze({
@@ -36,33 +34,19 @@ const PRESET_DEFINITIONS = Object.freeze({
     columns: 2,
     panelCount: 2,
   }),
+  [PRESET_IDS.ONE_BY_THREE]: Object.freeze({
+    id: PRESET_IDS.ONE_BY_THREE,
+    name: "1x3 (3)",
+    rows: 1,
+    columns: 3,
+    panelCount: 3,
+  }),
   [PRESET_IDS.ONE_BY_FOUR]: Object.freeze({
     id: PRESET_IDS.ONE_BY_FOUR,
     name: "2x2 (4)",
     rows: 2,
     columns: 2,
     panelCount: 4,
-  }),
-  [PRESET_IDS.TWO_BY_SIX]: Object.freeze({
-    id: PRESET_IDS.TWO_BY_SIX,
-    name: "2x3 (6)",
-    rows: 2,
-    columns: 3,
-    panelCount: 6,
-  }),
-  [PRESET_IDS.TWO_BY_EIGHT]: Object.freeze({
-    id: PRESET_IDS.TWO_BY_EIGHT,
-    name: "2x4 (8)",
-    rows: 2,
-    columns: 4,
-    panelCount: 8,
-  }),
-  [PRESET_IDS.THREE_BY_TWELVE]: Object.freeze({
-    id: PRESET_IDS.THREE_BY_TWELVE,
-    name: "3x4 (12)",
-    rows: 3,
-    columns: 4,
-    panelCount: 12,
   }),
 });
 
@@ -74,7 +58,7 @@ const LAYOUT_CONSTRAINTS = Object.freeze({
 });
 
 const PRESET_LAYOUT_SPEC = Object.freeze({
-  defaultPresetId: PRESET_IDS.ONE_BY_TWO,
+  defaultPresetId: PRESET_IDS.ONE_BY_ONE,
   presets: PRESET_DEFINITIONS,
   constraints: LAYOUT_CONSTRAINTS,
 });
