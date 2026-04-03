@@ -3,20 +3,12 @@ const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const SESSION_STATUS = Object.freeze({
-  CREATING: "creating",
-  RUNNING: "running",
-  STOPPING: "stopping",
-  STOPPED: "stopped",
-  ERRORED: "errored",
-  RECOVERING: "recovering",
-});
-
 const PRESET_IDS = Object.freeze({
   ONE_BY_ONE: "1x1",
   ONE_BY_TWO: "1x2",
   ONE_BY_THREE: "1x3",
   ONE_BY_FOUR: "1x4",
+  ONE_BY_SIX: "1x6",
 });
 
 const PRESET_DEFINITIONS = Object.freeze({
@@ -47,6 +39,13 @@ const PRESET_DEFINITIONS = Object.freeze({
     rows: 2,
     columns: 2,
     panelCount: 4,
+  }),
+  [PRESET_IDS.ONE_BY_SIX]: Object.freeze({
+    id: PRESET_IDS.ONE_BY_SIX,
+    name: "3x2 (6)",
+    rows: 2,
+    columns: 3,
+    panelCount: 6,
   }),
 });
 
@@ -82,28 +81,6 @@ function getPresetDefinition(presetId) {
 
 function getMaxPanelCount() {
   return Math.max(...Object.values(PRESET_DEFINITIONS).map((preset) => preset.panelCount));
-}
-
-function getGroupIdByPositionIndex(positionIndex, presetId) {
-  const preset = getPresetDefinition(presetId);
-  const row = Math.floor(positionIndex / preset.columns);
-  return `row-${row + 1}`;
-}
-
-function buildPanesForPreset(presetId) {
-  const preset = getPresetDefinition(presetId);
-  const panes = [];
-  for (let index = 0; index < preset.panelCount; index += 1) {
-    panes.push({
-      id: createId("pane"),
-      slotIndex: index,
-      positionIndex: index,
-      groupId: getGroupIdByPositionIndex(index, presetId),
-      state: "visible",
-      sessionId: null,
-    });
-  }
-  return panes;
 }
 
 function resolveWindowsShell() {
@@ -178,17 +155,12 @@ function clonePlainObject(value) {
 }
 
 module.exports = {
-  SESSION_STATUS,
   PRESET_IDS,
-  PRESET_DEFINITIONS,
   PRESET_LAYOUT_SPEC,
-  LAYOUT_CONSTRAINTS,
   createId,
   isPresetId,
   getPresetDefinition,
   getMaxPanelCount,
-  getGroupIdByPositionIndex,
-  buildPanesForPreset,
   getDefaultShell,
   clonePlainObject,
 };

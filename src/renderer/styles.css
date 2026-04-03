@@ -490,6 +490,11 @@ button:hover {
   grid-template-rows: repeat(1, minmax(0, 1fr));
 }
 
+.pane-grid.preset-1x6 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
 
 
 

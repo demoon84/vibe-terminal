@@ -3,6 +3,7 @@ const DEFAULT_PRESET_LAYOUTS = Object.freeze({
   "1x2": { id: "1x2", columns: 2, rows: 1, panelCount: 2 },
   "1x3": { id: "1x3", columns: 3, rows: 1, panelCount: 3 },
   "1x4": { id: "1x4", columns: 2, rows: 2, panelCount: 4 },
+  "1x6": { id: "1x6", columns: 3, rows: 2, panelCount: 6 },
 });
 const DEFAULT_LAYOUT_CONSTRAINTS = Object.freeze({
   minPanelWidthPx: 220,
@@ -165,7 +166,6 @@ const state = {
   terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
   activeGridResize: null,
   activePaneSwap: null,
-  terminalProfiles: [],
   attentionBySessionId: new Map(),
   expectedExitBySessionId: new Map(),
 };
@@ -373,13 +373,6 @@ function maybeNotifySessionExit(payload) {
   );
 }
 
-function normalizeShellKey(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\\/g, "/")
-    .toLowerCase();
-}
-
 function getShellBasename(value) {
   const normalized = String(value || "").trim().replace(/\\/g, "/");
   if (!normalized) {
@@ -389,46 +382,7 @@ function getShellBasename(value) {
   return segments.length > 0 ? segments[segments.length - 1] : normalized;
 }
 
-function areShellsEquivalent(left, right) {
-  const leftKey = normalizeShellKey(left);
-  const rightKey = normalizeShellKey(right);
-  if (!leftKey || !rightKey) {
-    return false;
-  }
-  if (leftKey === rightKey) {
-    return true;
-  }
-  return getShellBasename(leftKey) === getShellBasename(rightKey);
-}
-
-function getTerminalProfileByShell(shell) {
-  const profiles = Array.isArray(state.terminalProfiles) ? state.terminalProfiles : [];
-  const normalizedShell = normalizeShellKey(shell);
-  if (!normalizedShell) {
-    return null;
-  }
-
-  for (const profile of profiles) {
-    if (normalizeShellKey(profile?.shell) === normalizedShell) {
-      return profile;
-    }
-  }
-
-  const shellBasename = getShellBasename(normalizedShell);
-  for (const profile of profiles) {
-    if (getShellBasename(profile?.shell) === shellBasename) {
-      return profile;
-    }
-  }
-  return null;
-}
-
 function getShellDisplayLabel(shell) {
-  const matchedProfile = getTerminalProfileByShell(shell);
-  if (matchedProfile?.label) {
-    return matchedProfile.label;
-  }
-
   const basename = getShellBasename(shell);
   if (!basename) {
     return "기본 셸";
@@ -1267,13 +1221,6 @@ function closeSkillManagerDialog() {
   setSkillManagerOverlayVisible(false);
 }
 
-async function runSkillManagerSelection() {
-  await refreshSkillManagerCatalog({
-    showStatus: true,
-    query: state.skillManagerSearchQuery,
-  });
-}
-
 function scheduleSkillManagerSearchRefresh() {
   if (state.skillManagerSearchTimerId) {
     clearTimeout(state.skillManagerSearchTimerId);
@@ -1431,11 +1378,6 @@ function syncTerminalFontSizeControls(fontSize = state.terminalFontSize) {
   if (ui.terminalFontSizeDisplay) {
     ui.terminalFontSizeDisplay.textContent = String(normalized);
   }
-}
-
-function getTerminalFontSizeFromDialog() {
-  const preferred = ui.terminalFontSizeRange?.value || state.terminalFontSize;
-  return normalizeTerminalFontSize(preferred);
 }
 
 function updateTerminalFontPreview(
@@ -1938,7 +1880,28 @@ function getVisiblePanes(layout) {
     .sort((a, b) => (a.positionIndex ?? 0) - (b.positionIndex ?? 0));
 }
 
-function getPanePlacementsForLayoutVariant(layoutVariant, panelCount) {
+function getPanePlacementsForLayoutVariant(layoutVariant, panelCount, fallbackShape = null) {
+  const getGridPlacements = (gridShape) => {
+    const columns = Math.max(1, Math.floor(Number(gridShape?.columns) || panelCount || 1));
+    const rows = Math.max(
+      1,
+      Math.max(
+        Math.floor(Number(gridShape?.rows) || 1),
+        Math.ceil(Math.max(1, panelCount) / columns),
+      ),
+    );
+    return Array.from({ length: panelCount }, (_, index) => {
+      const columnIndex = index % columns;
+      const rowIndex = Math.floor(index / columns);
+      return {
+        columnStart: columnIndex + 1,
+        columnEnd: columnIndex + 2,
+        rowStart: Math.min(rowIndex, rows - 1) + 1,
+        rowEnd: Math.min(rowIndex, rows - 1) + 2,
+      };
+    });
+  };
+
   switch (panelCount) {
     case 1:
       return [
@@ -2046,12 +2009,7 @@ function getPanePlacementsForLayoutVariant(layoutVariant, panelCount) {
           ];
       }
     default:
-      return Array.from({ length: panelCount }, (_, index) => ({
-        columnStart: index + 1,
-        columnEnd: index + 2,
-        rowStart: 1,
-        rowEnd: 2,
-      }));
+      return getGridPlacements(fallbackShape);
   }
 }
 
@@ -2230,7 +2188,7 @@ function getPreferredFourPaneLayoutVariants(layoutSnapshot, sourcePaneId, target
 
 function buildCandidateLayoutState(orderIds, layoutVariant, panelCount, fallbackShape) {
   const gridShape = getGridShapeForLayoutVariant(layoutVariant, panelCount, fallbackShape);
-  const placements = getPanePlacementsForLayoutVariant(layoutVariant, panelCount);
+  const placements = getPanePlacementsForLayoutVariant(layoutVariant, panelCount, gridShape);
   if (!Array.isArray(placements) || placements.length !== orderIds.length) {
     return null;
   }
@@ -2456,6 +2414,7 @@ const GRID_PRESET_CLASS_NAMES = Object.freeze([
   "preset-1x2",
   "preset-1x3",
   "preset-1x4",
+  "preset-1x6",
 ]);
 
 function applyGridPreset(presetId) {
@@ -2709,7 +2668,11 @@ function mergeGridSplitterSegments(segments) {
 
 function buildGridSplitterSegments(layout, preset) {
   const visiblePanes = getVisiblePanes(layout);
-  const placements = getPanePlacementsForLayoutVariant(preset.layoutVariant, visiblePanes.length);
+  const placements = getPanePlacementsForLayoutVariant(
+    preset.layoutVariant,
+    visiblePanes.length,
+    preset,
+  );
   const segments = [];
 
   for (let leftIndex = 0; leftIndex < placements.length; leftIndex += 1) {
@@ -3346,13 +3309,6 @@ function renderGridSplitters(layout, preset) {
   });
 
   syncGridSplittersLayout();
-}
-
-function getDisplayStatus(status) {
-  if (!status || status === "running") {
-    return "";
-  }
-  return String(status);
 }
 
 function getDisplayCwd(cwd) {
@@ -4433,16 +4389,7 @@ function setFullAccessEnabled(view, enabled) {
   if (!view) {
     return;
   }
-
-  const nextValue = Boolean(enabled);
-  view.fullAccessEnabled = nextValue;
-
-  if (!view.fullAccessButton) {
-    return;
-  }
-
-  view.fullAccessButton.classList.toggle("is-selected", nextValue);
-  view.fullAccessButton.setAttribute("aria-pressed", String(nextValue));
+  view.fullAccessEnabled = Boolean(enabled);
 }
 
 function setButtonVisibility(button, visible) {
@@ -4575,17 +4522,6 @@ function getActiveAgentSessionIds() {
 
 function hasAnyActiveAgent() {
   return getActiveAgentSessionIds().length > 0;
-}
-
-function getActiveAgentViews() {
-  const activeViews = [];
-  for (const sessionId of getActiveAgentSessionIds()) {
-    const view = getSessionViewBySessionId(sessionId);
-    if (view) {
-      activeViews.push(view);
-    }
-  }
-  return activeViews;
 }
 
 function getPresetPanelCount(presetId) {
@@ -4893,52 +4829,6 @@ async function stopAllActiveAgents() {
   fallbackView?.terminal?.focus();
 }
 
-function setFullAccessButtonVisibility(view, visible) {
-  if (!view?.fullAccessButton) {
-    return;
-  }
-
-  setButtonVisibility(view.fullAccessButton, visible);
-}
-
-async function toggleFullAccessForView(view) {
-  if (!view) {
-    return;
-  }
-
-  if (view.isApplyingFullAccess) {
-    return;
-  }
-
-  const previousValue = Boolean(view.fullAccessEnabled);
-  const nextValue = !previousValue;
-  const activeAgent = view.selectedAgentCommand;
-
-  setFullAccessEnabled(view, nextValue);
-  const modeLabel = nextValue ? "enabled" : "disabled";
-
-  if (!activeAgent || !view.sessionId) {
-    setStatusLine(`모든권한 ${modeLabel}`);
-    view.terminal?.focus();
-    return;
-  }
-
-  view.isApplyingFullAccess = true;
-
-  try {
-    await killAndRecreateSession(view, "full-access-toggle");
-    runAgentForView(view, activeAgent);
-    setStatusLine(`모든권한 ${modeLabel}; ${activeAgent} restarted`);
-  } catch (error) {
-    setFullAccessEnabled(view, previousValue);
-    setStatusLine(`모든권한 적용 실패: ${String(error)}`);
-  } finally {
-    view.isApplyingFullAccess = false;
-    setAgentCommandSelection(view, view.selectedAgentCommand);
-    view.terminal?.focus();
-  }
-}
-
 function setAgentCommandSelection(view, command) {
   if (!view) {
     return;
@@ -4985,7 +4875,6 @@ function setAgentCommandSelection(view, command) {
     setButtonVisibility(view.clearButton, !hasActiveAgent);
   }
 
-  setFullAccessButtonVisibility(view, hasActiveAgent);
   if (!hasActiveAgent) {
     setFullAccessEnabled(view, DEFAULT_FULL_ACCESS_ENABLED);
   }
@@ -5370,7 +5259,6 @@ function createPaneView(pane, index, preset, sessionMap) {
     codexButton,
     claudeButton,
     geminiButton,
-    fullAccessButton: null,
 
     editorGroup,
     openButton,
@@ -5380,7 +5268,6 @@ function createPaneView(pane, index, preset, sessionMap) {
     editorMenu,
     selectedEditorId: null,
     fullAccessEnabled: DEFAULT_FULL_ACCESS_ENABLED,
-    isApplyingFullAccess: false,
     selectedAgentCommand: null,
     resizeObserver: null,
     fitTimer: null,
@@ -5644,6 +5531,7 @@ function renderLayout(layout) {
   const panePlacements = getPanePlacementsForLayoutVariant(
     preset.layoutVariant,
     visiblePanes.length,
+    preset,
   );
 
   applyGridPreset(state.layout.presetId);

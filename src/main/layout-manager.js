@@ -1,7 +1,6 @@
 const {
   PRESET_IDS,
   PRESET_LAYOUT_SPEC,
-  PRESET_DEFINITIONS,
   getPresetDefinition,
   getMaxPanelCount,
   isPresetId,
@@ -623,5 +622,4 @@ class LayoutManager {
 
 module.exports = {
   LayoutManager,
-  PRESET_LAYOUTS: PRESET_DEFINITIONS,
 };

@@ -1,6 +1,6 @@
 {
   "name": "vibe-terminal-layout-system",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "main": "src/main/main.js",
   "scripts": {
