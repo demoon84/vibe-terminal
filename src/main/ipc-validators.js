@@ -443,6 +443,9 @@ function validateAgentCommandPayload(payload) {
   if (!agentCommand) {
     return { ok: false, error: "invalid-payload:agentCommand" };
   }
+  if (agentCommand !== "codex") {
+    return { ok: false, error: "invalid-payload:agentCommand-unsupported" };
+  }
   return { ok: true, value: { agentCommand } };
 }
 

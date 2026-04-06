@@ -1,11 +1,11 @@
 # Vibe Terminal
 
-`Codex`, `Claude`, `Gemini` 같은 코딩 에이전트를 여러 터미널 pane으로 동시에 다루기 위한 Electron 기반 데스크톱 앱입니다.
+`Codex`를 여러 터미널 pane으로 동시에 다루기 위한 Electron 기반 데스크톱 앱입니다.
 
 ## 주요 기능
 
 - `1`, `2`, `3`, `4`, `6` 분할 preset 지원
-- pane별 에이전트 실행 버튼과 전역 마운트 버튼 제공
+- pane별 Codex 실행 버튼과 전역 마운트 버튼 제공
 - pane별 셸 프로필 전환 (`PowerShell` / `CMD` / `WSL` / `zsh` / `bash`)
 - pane 크기 조절과 레이아웃 저장/복원
 - 확인 필요 / 완료 / 오류 상태 강조와 하단 status line 피드백

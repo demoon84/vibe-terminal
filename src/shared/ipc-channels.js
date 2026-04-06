@@ -20,6 +20,7 @@ const IPC_CHANNELS = Object.freeze({
   APP_WINDOW_STATE: "app:window-state",
   APP_PICK_DIRECTORY: "app:pick-directory",
   APP_PICK_FILES: "app:pick-files",
+  APP_AGENT_MODEL_HINTS: "app:agent-model-hints",
   APP_AGENT_INSTALL_STATUS: "app:agent-install-status",
   APP_AGENT_INSTALL_LATEST: "app:agent-install-latest",
   APP_AGENT_UNINSTALL: "app:agent-uninstall",

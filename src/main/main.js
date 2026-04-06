@@ -72,22 +72,9 @@ const AGENT_INSTALL_TARGETS = Object.freeze({
     npmUrl: "https://www.npmjs.com/package/@openai/codex",
     docsUrl: "https://github.com/openai/codex",
   }),
-  claude: Object.freeze({
-    id: "claude",
-    label: "Claude",
-    executable: "claude",
-    packageName: "@anthropic-ai/claude-code",
-    npmUrl: "https://www.npmjs.com/package/@anthropic-ai/claude-code",
-    docsUrl: "https://docs.anthropic.com/en/docs/claude-code/setup",
-  }),
-  gemini: Object.freeze({
-    id: "gemini",
-    label: "Gemini",
-    executable: "gemini",
-    packageName: "@google/gemini-cli",
-    npmUrl: "https://www.npmjs.com/package/@google/gemini-cli",
-    docsUrl: "https://github.com/google-gemini/gemini-cli",
-  }),
+});
+const AGENT_MODEL_ENV_KEYS = Object.freeze({
+  codex: Object.freeze(["OPENAI_MODEL", "CODEX_MODEL", "OPENAI_DEFAULT_MODEL"]),
 });
 const CURATED_SKILL_REPO = "openai/skills";
 const CURATED_SKILL_PATH_PREFIX = "skills/.curated";
@@ -552,6 +539,47 @@ function getAgentInstallTarget(agentCommand) {
     return null;
   }
   return AGENT_INSTALL_TARGETS[key];
+}
+
+function normalizeAgentModelHint(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const doubleQuotedMatch = normalized.match(/^"(.*)"$/);
+  if (doubleQuotedMatch) {
+    return doubleQuotedMatch[1].trim();
+  }
+
+  const singleQuotedMatch = normalized.match(/^'(.*)'$/);
+  if (singleQuotedMatch) {
+    return singleQuotedMatch[1].trim();
+  }
+
+  return normalized;
+}
+
+function getAgentModelHint(agentCommand) {
+  const envKeys = AGENT_MODEL_ENV_KEYS[agentCommand] || [];
+  for (const envKey of envKeys) {
+    const hint = normalizeAgentModelHint(process.env[envKey]);
+    if (hint) {
+      return hint;
+    }
+  }
+  return "";
+}
+
+function getAllAgentModelHints() {
+  const hints = {};
+  for (const agentCommand of Object.keys(AGENT_INSTALL_TARGETS)) {
+    hints[agentCommand] = getAgentModelHint(agentCommand);
+  }
+  return {
+    ok: true,
+    hints,
+  };
 }
 
 function isExecutableAvailable(commandName) {
@@ -3769,6 +3797,16 @@ app.whenReady().then(() => {
       };
     }
     return getAgentInstallStatus(validated.value.agentCommand);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_AGENT_MODEL_HINTS, (event) => {
+    if (!isTrustedRendererEvent(event)) {
+      return {
+        ok: false,
+        error: "forbidden",
+      };
+    }
+    return getAllAgentModelHints();
   });
 
   ipcMain.handle(IPC_CHANNELS.APP_AGENT_INSTALL_LATEST, async (event, payload = {}) => {

@@ -4,7 +4,7 @@
   "private": true,
   "main": "src/main/main.js",
   "scripts": {
-    "electron:start": "electron .",
+    "electron:start": "electron . --user-data-dir=.electron-dev-profile",
     "rebuild:native": "electron-builder install-app-deps",
     "package": "electron-builder --win portable",
     "package:installer": "electron-builder --win nsis",

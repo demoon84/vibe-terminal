@@ -11,6 +11,7 @@ const DEFAULT_LAYOUT_CONSTRAINTS = Object.freeze({
   splitterSizePx: 1,
   splitterHitAreaPx: 16,
 });
+const PRESET_ONLY_LAYOUT_MODE = false;
 const GRID_SPLITTER_SELECTOR = ".pane-grid-splitter";
 
 const runtimeWindow = /** @type {any} */ (window);
@@ -36,6 +37,7 @@ const SKILL_MANAGER_REMOTE_QUERY_MIN = 2;
 const SKILL_MANAGER_SEARCH_DEBOUNCE_MS = 260;
 const USER_QUESTION_BUFFER_MAX_CHARS = 600;
 const USER_QUESTION_TEXT_MAX_CHARS = 220;
+const TASK_NAME_MAX_CHARS = 40;
 const DESKTOP_NOTIFICATION_MIN_INTERVAL_MS = 6_000;
 const TERMINAL_CONFIRMATION_NOTIFY_COOLDOWN_MS = 12_000;
 const NOTIFICATION_TERMINAL_PREVIEW_MAX_CHARS = 180;
@@ -79,21 +81,15 @@ const FULL_ACCESS_AGENT_COMMANDS = Object.freeze({
     normal: "codex",
     fullAccess: "codex --dangerously-bypass-approvals-and-sandbox",
   },
-  claude: {
-    normal: "claude",
-    fullAccess: "claude --dangerously-skip-permissions",
-  },
-  gemini: {
-    normal: "gemini",
-    fullAccess: "gemini --sandbox=false",
-  },
 });
 const AGENT_COMMAND_LABELS = Object.freeze({
   codex: "Codex",
-  claude: "Claude",
-  gemini: "Gemini",
 });
-const REQUIRED_AGENT_COMMANDS = Object.freeze(["codex", "claude", "gemini"]);
+const AGENT_MODEL_ENV_KEYS = Object.freeze({
+  codex: Object.freeze(["OPENAI_MODEL", "CODEX_MODEL", "OPENAI_DEFAULT_MODEL"]),
+});
+const DEFAULT_AGENT_MODEL_LABEL = "default";
+const REQUIRED_AGENT_COMMANDS = Object.freeze(["codex"]);
 const ATTENTION_PRESETS = Object.freeze({
   confirmation: Object.freeze({
     label: "승인대기",
@@ -122,9 +118,6 @@ const ui = {
   titlebarPathSettingButton: document.getElementById("titlebar-path-setting-btn"),
   titlebarFontSettingButton: document.getElementById("titlebar-font-setting-btn"),
   titlebarSkillManagerButton: document.getElementById("titlebar-skill-manager-btn"),
-  titlebarMountCodexButton: document.getElementById("titlebar-mount-codex-btn"),
-  titlebarMountClaudeButton: document.getElementById("titlebar-mount-claude-btn"),
-  titlebarMountGeminiButton: document.getElementById("titlebar-mount-gemini-btn"),
   titlebarAllExitButton: document.getElementById("titlebar-all-exit-btn"),
   terminalFontOverlay: document.getElementById("terminal-font-overlay"),
   terminalFontSelect: /** @type {HTMLSelectElement | null} */ (document.getElementById("terminal-font-select")),
@@ -147,6 +140,9 @@ const state = {
   sessionCapabilityBySessionId: new Map(),
   sessionSnapshotBySessionId: new Map(),
   selectedAgentBySessionId: new Map(),
+  configuredAgentModelHints: {
+    codex: "",
+  },
   autoInstallSkippedAgents: new Set(),
   eventUnsubscribers: [],
   isMaximized: false,
@@ -158,6 +154,7 @@ const state = {
   skillCatalog: [],
   skillManagerSearchQuery: "",
   skillManagerSearchTimerId: null,
+  taskNameBySessionId: new Map(),
   pendingQuestionInputBySessionId: new Map(),
   desktopNotificationsEnabled: true,
   lastDesktopNotificationAtByKey: new Map(),
@@ -282,6 +279,128 @@ function getAgentLabelBySessionId(sessionId) {
     return "";
   }
   return AGENT_COMMAND_LABELS[remembered] || remembered;
+}
+
+function normalizeAgentModelLabel(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const doubleQuotedMatch = normalized.match(/^"(.*)"$/);
+  if (doubleQuotedMatch) {
+    return doubleQuotedMatch[1].trim();
+  }
+
+  const singleQuotedMatch = normalized.match(/^'(.*)'$/);
+  if (singleQuotedMatch) {
+    return singleQuotedMatch[1].trim();
+  }
+
+  return normalized;
+}
+
+function getAgentModelHintFromEnv(env, agentCommand) {
+  if (!env || typeof env !== "object" || !isAgentCommand(agentCommand)) {
+    return "";
+  }
+
+  const envKeys = AGENT_MODEL_ENV_KEYS[agentCommand] || [];
+  for (const envKey of envKeys) {
+    const hint = normalizeAgentModelLabel(env?.[envKey]);
+    if (hint) {
+      return hint;
+    }
+  }
+
+  return "";
+}
+
+function extractModelOptionFromCommand(command) {
+  const normalized = String(command || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const patterns = [
+    /(?:^|\s)--model(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/,
+    /(?:^|\s)-m(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) {
+      continue;
+    }
+    const hint = normalizeAgentModelLabel(match[1] || match[2] || match[3] || "");
+    if (hint) {
+      return hint;
+    }
+  }
+
+  return "";
+}
+
+function getAgentLaunchCommandValue(agentCommand, fullAccessEnabled) {
+  const config = FULL_ACCESS_AGENT_COMMANDS[agentCommand];
+  if (!config) {
+    return "";
+  }
+  return fullAccessEnabled ? config.fullAccess : config.normal;
+}
+
+function resolveAgentModelLabel(view, agentCommand) {
+  if (!view || !isAgentCommand(agentCommand)) {
+    return "";
+  }
+
+  const commandHint = extractModelOptionFromCommand(
+    getAgentLaunchCommandValue(agentCommand, Boolean(view.fullAccessEnabled)),
+  );
+  if (commandHint) {
+    return commandHint;
+  }
+
+  const sessionEnvHint = getAgentModelHintFromEnv(getLayoutSessionById(view.sessionId)?.env, agentCommand);
+  if (sessionEnvHint) {
+    return sessionEnvHint;
+  }
+
+  const configuredHint = normalizeAgentModelLabel(state.configuredAgentModelHints?.[agentCommand]);
+  if (configuredHint) {
+    return configuredHint;
+  }
+
+  return DEFAULT_AGENT_MODEL_LABEL;
+}
+
+function syncViewModelIndicator(view) {
+  if (!view?.modelIndicator) {
+    return;
+  }
+
+  const activeAgent = isAgentCommand(view.selectedAgentCommand) ? view.selectedAgentCommand : null;
+  if (!activeAgent) {
+    view.modelIndicator.textContent = "";
+    view.modelIndicator.title = "";
+    view.modelIndicator.classList.add("is-hidden");
+    view.modelIndicator.setAttribute("aria-hidden", "true");
+    return;
+  }
+
+  const modelLabel = resolveAgentModelLabel(view, activeAgent);
+  if (modelLabel === DEFAULT_AGENT_MODEL_LABEL) {
+    view.modelIndicator.textContent = "";
+    view.modelIndicator.title = "";
+    view.modelIndicator.classList.add("is-hidden");
+    view.modelIndicator.setAttribute("aria-hidden", "true");
+    return;
+  }
+
+  view.modelIndicator.textContent = modelLabel;
+  view.modelIndicator.title = `${AGENT_COMMAND_LABELS[activeAgent] || activeAgent} model: ${modelLabel}`;
+  view.modelIndicator.classList.remove("is-hidden");
+  view.modelIndicator.setAttribute("aria-hidden", "false");
 }
 
 function normalizeTerminalOutputForNotification(data) {
@@ -1857,10 +1976,12 @@ function getPresetConfig(layout, presetId) {
   const presets = layout?.presetSpec?.presets || {};
   const fallback = presets[presetId] || DEFAULT_PRESET_LAYOUTS[presetId] || DEFAULT_PRESET_LAYOUTS["1x2"];
   const panelCount = Math.max(1, Math.floor(Number(fallback?.panelCount) || 1));
+  const sourceLayoutVariant = PRESET_ONLY_LAYOUT_MODE ? null : layout?.layoutVariant;
+  const sourceGridShape = PRESET_ONLY_LAYOUT_MODE ? null : layout?.gridShape;
   const layoutVariant = normalizeLayoutVariantForPanelCount(
-    layout?.layoutVariant,
+    sourceLayoutVariant,
     panelCount,
-    layout?.gridShape,
+    sourceGridShape,
     fallback,
   );
   const resolvedGridShape = getGridShapeForLayoutVariant(layoutVariant, panelCount, fallback);
@@ -2503,7 +2624,7 @@ function buildLayoutSavePayload(layoutSnapshot, options = {}) {
       columns: preset.columns,
       rows: preset.rows,
     },
-    gridTracks: cloneGridTracks(layoutSnapshot.gridTracks),
+    gridTracks: PRESET_ONLY_LAYOUT_MODE ? null : cloneGridTracks(layoutSnapshot.gridTracks),
   };
 
   if (options.includePanes) {
@@ -2543,6 +2664,12 @@ function getLayoutConstraints(layout) {
 function getEffectiveGridTracks(layout, preset) {
   const columnCount = Math.max(1, Math.floor(Number(preset?.columns) || 1));
   const rowCount = Math.max(1, Math.floor(Number(preset?.rows) || 1));
+  if (PRESET_ONLY_LAYOUT_MODE) {
+    return {
+      columns: getEqualTrackSizes(columnCount),
+      rows: getEqualTrackSizes(rowCount),
+    };
+  }
   const savedColumns = normalizeTrackSizes(layout?.gridTracks?.columns, columnCount);
   const savedRows = normalizeTrackSizes(layout?.gridTracks?.rows, rowCount);
 
@@ -2982,18 +3109,19 @@ function resolvePaneSwapTarget(clientX, clientY, sourcePaneId) {
   const normalizedY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
   const offsetX = normalizedX - 0.5;
   const offsetY = normalizedY - 0.5;
-  const targetEdge = Math.abs(offsetX) >= Math.abs(offsetY)
+  const dropEdge = Math.abs(offsetX) >= Math.abs(offsetY)
     ? offsetX < 0
       ? "left"
       : "right"
     : offsetY < 0
       ? "top"
       : "bottom";
+  const targetEdge = PRESET_ONLY_LAYOUT_MODE ? "swap" : dropEdge;
   const preferredLayoutVariants = getPreferredLayoutVariantsForPaneSwap(
     state.layout,
     sourcePaneId,
     paneId,
-    targetEdge,
+    dropEdge,
   );
 
   return {
@@ -3024,6 +3152,37 @@ async function reorderPanePositions(sourcePaneId, targetPaneId, targetEdge, pref
   const targetPane = visiblePanes.find((pane) => pane?.id === targetPaneId);
   if (!sourcePane || !targetPane) {
     return false;
+  }
+
+  if (PRESET_ONLY_LAYOUT_MODE) {
+    const sourcePositionIndex = Math.max(0, Math.floor(Number(sourcePane.positionIndex) || 0));
+    const targetPositionIndex = Math.max(0, Math.floor(Number(targetPane.positionIndex) || 0));
+    if (sourcePositionIndex === targetPositionIndex) {
+      return false;
+    }
+
+    sourcePane.positionIndex = targetPositionIndex;
+    targetPane.positionIndex = sourcePositionIndex;
+    sourcePane.groupId = getGroupIdByPositionIndexForGridShape(targetPositionIndex, currentPreset);
+    targetPane.groupId = getGroupIdByPositionIndexForGridShape(sourcePositionIndex, currentPreset);
+
+    const result = await persistActiveLayoutSnapshot(nextLayout);
+    if (!result?.ok) {
+      setStatusLine("터미널 위치 교환 실패");
+      return false;
+    }
+
+    const savedLayout = result.layout || nextLayout;
+    rememberSessionCapabilities(savedLayout?.sessionCapabilities || {});
+    renderLayout(savedLayout);
+
+    const sourceSessionId = sourcePane.sessionId;
+    if (sourceSessionId) {
+      getSessionViewBySessionId(sourceSessionId)?.terminal?.focus();
+    }
+
+    setStatusLine("터미널 위치 교환");
+    return true;
   }
 
   const nextLayoutState = chooseNextPaneLayoutState(
@@ -3212,7 +3371,7 @@ function startPaneSwap(view, event) {
 }
 
 function startGridResize(axis, trackIndex, event) {
-  if (!ui.grid || !state.layout || event.button !== 0) {
+  if (PRESET_ONLY_LAYOUT_MODE || !ui.grid || !state.layout || event.button !== 0) {
     return;
   }
 
@@ -3285,7 +3444,7 @@ function startGridResize(axis, trackIndex, event) {
 
 function renderGridSplitters(layout, preset) {
   clearGridSplitters();
-  if (!ui.grid || !layout || !preset) {
+  if (PRESET_ONLY_LAYOUT_MODE || !ui.grid || !layout || !preset) {
     return;
   }
 
@@ -4158,20 +4317,8 @@ async function runCodexForView(view) {
   await runAgentForViewWithInstallCheck(view, "codex");
 }
 
-async function runClaudeForView(view) {
-  await runAgentForViewWithInstallCheck(view, "claude");
-}
-
-async function runGeminiForView(view) {
-  await runAgentForViewWithInstallCheck(view, "gemini");
-}
-
 async function getAgentLaunchCommand(agentCommand, fullAccessEnabled) {
-  const config = FULL_ACCESS_AGENT_COMMANDS[agentCommand];
-  if (!config) {
-    return null;
-  }
-  return fullAccessEnabled ? config.fullAccess : config.normal;
+  return getAgentLaunchCommandValue(agentCommand, fullAccessEnabled) || null;
 }
 
 async function runAgentForView(view, agentCommand, options = {}) {
@@ -4390,6 +4537,7 @@ function setFullAccessEnabled(view, enabled) {
     return;
   }
   view.fullAccessEnabled = Boolean(enabled);
+  syncViewModelIndicator(view);
 }
 
 function setButtonVisibility(button, visible) {
@@ -4592,7 +4740,6 @@ function updateTitlebarPathSettingVisibility() {
   const isStoppingAllAgents = state.isStoppingAllAgents;
   const canUseSetupControls = !hasActiveAgent;
   const shouldShowSetupControls = canUseSetupControls && !isStoppingAllAgents;
-  const shouldShowMountControls = !hasActiveAgent;
   const shouldShowAllExit = true;
   const canOpenFontDialog = !isStoppingAllAgents;
 
@@ -4600,22 +4747,11 @@ function updateTitlebarPathSettingVisibility() {
   setTitlebarElementVisibility(ui.titlebarPathSettingButton, shouldShowSetupControls);
   setTitlebarElementVisibility(ui.titlebarSkillManagerButton, true);
   setTitlebarElementVisibility(ui.titlebarFontSettingButton, true);
-  setTitlebarElementVisibility(ui.titlebarMountCodexButton, shouldShowMountControls);
-  setTitlebarElementVisibility(ui.titlebarMountClaudeButton, shouldShowMountControls);
-  setTitlebarElementVisibility(ui.titlebarMountGeminiButton, shouldShowMountControls);
   setTitlebarElementVisibility(ui.titlebarAllExitButton, shouldShowAllExit);
 
   setTitlebarButtonEnabled(ui.titlebarPathSettingButton, canUseSetupControls);
   setTitlebarButtonEnabled(ui.titlebarSkillManagerButton, !isStoppingAllAgents);
   setTitlebarButtonEnabled(ui.titlebarFontSettingButton, canOpenFontDialog);
-
-  for (const button of [
-    ui.titlebarMountCodexButton,
-    ui.titlebarMountClaudeButton,
-    ui.titlebarMountGeminiButton,
-  ]) {
-    setTitlebarButtonEnabled(button, !isStoppingAllAgents);
-  }
 
   const canRunAllExit = hasActiveAgent && !isStoppingAllAgents;
   setTitlebarButtonEnabled(ui.titlebarAllExitButton, canRunAllExit);
@@ -4676,7 +4812,7 @@ async function applyGlobalDirectoryToVisiblePanes() {
 }
 
 function isAgentCommand(agentCommand) {
-  return agentCommand === "codex" || agentCommand === "claude" || agentCommand === "gemini";
+  return agentCommand === "codex";
 }
 
 function rememberAgentSelection(view) {
@@ -4711,6 +4847,62 @@ function pruneRememberedAgentSelections(layout) {
   for (const sessionId of state.selectedAgentBySessionId.keys()) {
     if (!aliveSessionIds.has(sessionId)) {
       state.selectedAgentBySessionId.delete(sessionId);
+    }
+  }
+}
+
+function normalizeTaskName(value) {
+  const normalized = String(value || "")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.slice(0, TASK_NAME_MAX_CHARS);
+}
+
+function getDefaultTaskNameFromCwd(cwd) {
+  const raw = String(cwd || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const withoutTrailing = raw.replace(/[\\/]+$/, "");
+  const segments = withoutTrailing.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  const lastSegment = segments.length > 0 ? segments[segments.length - 1] : withoutTrailing;
+  return normalizeTaskName(lastSegment);
+}
+
+function rememberTaskName(sessionId, value) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return;
+  }
+  const normalizedTaskName = normalizeTaskName(value);
+  if (!normalizedTaskName) {
+    state.taskNameBySessionId.delete(normalizedSessionId);
+    return;
+  }
+  state.taskNameBySessionId.set(normalizedSessionId, normalizedTaskName);
+}
+
+function getRememberedTaskName(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId) {
+    return "";
+  }
+  return String(state.taskNameBySessionId.get(normalizedSessionId) || "");
+}
+
+function pruneRememberedTaskNames(layout) {
+  const aliveSessionIds = new Set(
+    (layout?.sessions || [])
+      .map((session) => session?.id)
+      .filter((sessionId) => typeof sessionId === "string" && sessionId.length > 0),
+  );
+
+  for (const sessionId of state.taskNameBySessionId.keys()) {
+    if (!aliveSessionIds.has(sessionId)) {
+      state.taskNameBySessionId.delete(sessionId);
     }
   }
 }
@@ -4834,14 +5026,11 @@ function setAgentCommandSelection(view, command) {
     return;
   }
 
-  const selected =
-    command === "codex" || command === "claude" || command === "gemini" ? command : null;
+  const selected = command === "codex" ? command : null;
   view.selectedAgentCommand = selected;
   rememberAgentSelection(view);
 
   const codexSelected = selected === "codex";
-  const claudeSelected = selected === "claude";
-  const geminiSelected = selected === "gemini";
   const hasActiveAgent = Boolean(selected);
   const shouldShowBrowseButton = !hasActiveAgent;
 
@@ -4853,18 +5042,6 @@ function setAgentCommandSelection(view, command) {
     view.codexButton.classList.toggle("is-selected", codexSelected);
     view.codexButton.setAttribute("aria-pressed", String(codexSelected));
     setButtonVisibility(view.codexButton, !hasActiveAgent || codexSelected);
-  }
-
-  if (view.claudeButton) {
-    view.claudeButton.classList.toggle("is-selected", claudeSelected);
-    view.claudeButton.setAttribute("aria-pressed", String(claudeSelected));
-    setButtonVisibility(view.claudeButton, !hasActiveAgent || claudeSelected);
-  }
-
-  if (view.geminiButton) {
-    view.geminiButton.classList.toggle("is-selected", geminiSelected);
-    view.geminiButton.setAttribute("aria-pressed", String(geminiSelected));
-    setButtonVisibility(view.geminiButton, !hasActiveAgent || geminiSelected);
   }
 
   if (view.terminateButton) {
@@ -4879,6 +5056,7 @@ function setAgentCommandSelection(view, command) {
     setFullAccessEnabled(view, DEFAULT_FULL_ACCESS_ENABLED);
   }
 
+  syncViewModelIndicator(view);
   scheduleFitAndResize(view);
   updatePresetButtonVisibility();
   updateTitlebarPathSettingVisibility();
@@ -5070,6 +5248,8 @@ function createPaneView(pane, index, preset, sessionMap) {
   attentionBadge.className = "pane-attention-badge";
   const agentSegment = document.createElement("div");
   agentSegment.className = "pane-action-segment pane-agent-segment";
+  const taskSegment = document.createElement("div");
+  taskSegment.className = "pane-action-segment pane-task-segment";
   const utilitySegment = document.createElement("div");
   utilitySegment.className = "pane-action-segment pane-utility-segment";
 
@@ -5098,19 +5278,16 @@ function createPaneView(pane, index, preset, sessionMap) {
   codexButton.textContent = "Codex";
   codexButton.setAttribute("aria-pressed", "false");
 
-  const claudeButton = document.createElement("button");
-  claudeButton.type = "button";
-  claudeButton.className = "pane-path-btn pane-agent-btn";
-  claudeButton.title = "Claude";
-  claudeButton.textContent = "Claude";
-  claudeButton.setAttribute("aria-pressed", "false");
+  const taskNameInput = document.createElement("input");
+  taskNameInput.type = "text";
+  taskNameInput.className = "pane-task-name-input";
+  taskNameInput.placeholder = "작업명";
+  taskNameInput.setAttribute("aria-label", "작업명");
+  taskNameInput.maxLength = TASK_NAME_MAX_CHARS;
 
-  const geminiButton = document.createElement("button");
-  geminiButton.type = "button";
-  geminiButton.className = "pane-path-btn pane-agent-btn";
-  geminiButton.title = "Gemini";
-  geminiButton.textContent = "Gemini";
-  geminiButton.setAttribute("aria-pressed", "false");
+  const modelIndicator = document.createElement("span");
+  modelIndicator.className = "pane-model-indicator is-hidden";
+  modelIndicator.setAttribute("aria-hidden", "true");
 
 
 
@@ -5187,14 +5364,15 @@ function createPaneView(pane, index, preset, sessionMap) {
   footer.appendChild(footerPath);
 
   agentSegment.appendChild(codexButton);
-  agentSegment.appendChild(claudeButton);
-  agentSegment.appendChild(geminiButton);
+  agentSegment.appendChild(modelIndicator);
+  taskSegment.appendChild(taskNameInput);
   utilitySegment.appendChild(clearButton);
   utilitySegment.appendChild(browseButton);
   utilitySegment.appendChild(terminateButton);
 
   actionsLeft.appendChild(attentionBadge);
   actionsLeft.appendChild(agentSegment);
+  actionsLeft.appendChild(taskSegment);
 
   actionsRight.appendChild(editorGroup);
   actionsRight.appendChild(utilitySegment);
@@ -5257,8 +5435,8 @@ function createPaneView(pane, index, preset, sessionMap) {
     clearButton,
     browseButton,
     codexButton,
-    claudeButton,
-    geminiButton,
+    taskNameInput,
+    modelIndicator,
 
     editorGroup,
     openButton,
@@ -5318,6 +5496,12 @@ function createPaneView(pane, index, preset, sessionMap) {
   // are switched, which appears as garbled input.
 
   setPaneFooterCwd(view, initialCwd);
+  const rememberedTaskName = getRememberedTaskName(view.sessionId);
+  const defaultTaskName = getDefaultTaskNameFromCwd(initialCwd);
+  taskNameInput.value = rememberedTaskName || defaultTaskName;
+  if (!rememberedTaskName && defaultTaskName) {
+    rememberTaskName(view.sessionId, defaultTaskName);
+  }
   const rememberedAgent = getRememberedAgentSelection(view.sessionId);
   setAgentCommandSelection(view, rememberedAgent);
   setFullAccessEnabled(view, DEFAULT_FULL_ACCESS_ENABLED);
@@ -5379,13 +5563,13 @@ function createPaneView(pane, index, preset, sessionMap) {
     event.stopPropagation();
     await runCodexForView(view);
   });
-  claudeButton.addEventListener("click", async (event) => {
-    event.stopPropagation();
-    await runClaudeForView(view);
+  taskNameInput.addEventListener("input", () => {
+    rememberTaskName(view.sessionId, taskNameInput.value);
   });
-  geminiButton.addEventListener("click", async (event) => {
-    event.stopPropagation();
-    await runGeminiForView(view);
+  taskNameInput.addEventListener("blur", () => {
+    const normalizedTaskName = normalizeTaskName(taskNameInput.value);
+    taskNameInput.value = normalizedTaskName;
+    rememberTaskName(view.sessionId, normalizedTaskName);
   });
   clearButton.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -5455,10 +5639,12 @@ function createPaneView(pane, index, preset, sessionMap) {
     }
   };
 
-  body.addEventListener("dragenter", handleDragEnter);
-  body.addEventListener("dragover", handleDragOver);
-  body.addEventListener("dragleave", handleDragLeave);
-  body.addEventListener("drop", handleDrop);
+  [body].forEach((element) => {
+    element.addEventListener("dragenter", handleDragEnter);
+    element.addEventListener("dragover", handleDragOver);
+    element.addEventListener("dragleave", handleDragLeave);
+    element.addEventListener("drop", handleDrop);
+  });
 
   // Let xterm handle pointer events naturally so drag-selection is not interrupted.
 
@@ -5492,6 +5678,8 @@ function updatePaneStatusBySessionId(sessionId, status, cwd, shell) {
     syncViewShellPresentation(view);
     populateShellMenu(view);
   }
+
+  syncViewModelIndicator(view);
 }
 
 function appendOutput(sessionId, data) {
@@ -5524,6 +5712,7 @@ function renderLayout(layout) {
   pruneSessionCapabilities(state.layout);
   pruneSessionSnapshots(state.layout);
   pruneRememberedAgentSelections(state.layout);
+  pruneRememberedTaskNames(state.layout);
 
   const preset = getPresetConfig(state.layout, state.layout.presetId);
   const visiblePanes = getVisiblePanes(state.layout);
@@ -5618,6 +5807,29 @@ async function restoreLayout() {
   }
 }
 
+async function loadConfiguredAgentModelHints() {
+  if (!api?.app?.process?.getAgentModelHints) {
+    return;
+  }
+
+  try {
+    const result = await api.app.process.getAgentModelHints();
+    if (!result?.ok || !result.hints || typeof result.hints !== "object") {
+      return;
+    }
+
+    state.configuredAgentModelHints = {
+      codex: normalizeAgentModelLabel(result.hints.codex),
+    };
+
+    for (const view of state.paneViews.values()) {
+      syncViewModelIndicator(view);
+    }
+  } catch (_error) {
+    // Ignore model hint lookup failures and fall back to default labels.
+  }
+}
+
 async function requestCloseWindow() {
   if (state.isWindowClosing) {
     return;
@@ -5690,15 +5902,6 @@ function bindEvents() {
 
   ui.titlebarFontSettingButton?.addEventListener("click", () => {
     openTerminalFontDialog();
-  });
-  ui.titlebarMountCodexButton?.addEventListener("click", async () => {
-    await mountAgentToAllVisiblePanes("codex");
-  });
-  ui.titlebarMountClaudeButton?.addEventListener("click", async () => {
-    await mountAgentToAllVisiblePanes("claude");
-  });
-  ui.titlebarMountGeminiButton?.addEventListener("click", async () => {
-    await mountAgentToAllVisiblePanes("gemini");
   });
   ui.titlebarAllExitButton?.addEventListener("click", async () => {
     await stopAllActiveAgents();
@@ -5832,6 +6035,7 @@ async function bootstrap() {
   );
 
   bindEvents();
+  await loadConfiguredAgentModelHints();
   await ensureRequiredAgentsInstalledOnStartup();
   await ensurePowerShell7Ready();
   await runTerminalColorDiagnosticsOnStartup();

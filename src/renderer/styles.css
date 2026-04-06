@@ -109,9 +109,9 @@ body.is-pane-swapping * {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: stretch;
-  border-bottom: 1px solid var(--split-line-strong);
-  box-shadow: inset 0 -1px 0 var(--split-line);
-  background: linear-gradient(90deg, #323233 0%, #3c3c3c 50%, #323233 100%);
+  border-bottom: 0;
+  box-shadow: none;
+  background: #323233;
   overflow: hidden;
 }
 
@@ -506,9 +506,7 @@ button:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.34);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.34);
 }
 
 .pane.is-attention-confirmation {
@@ -585,21 +583,14 @@ button:hover {
 }
 
 .pane-swap-handle::after {
-  content: "";
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  top: 3px;
-  height: 2px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  content: none;
 }
 
 .pane-swap-handle:hover::after,
 .pane.is-swap-source .pane-swap-handle::after,
 .pane-header.is-active .pane-swap-handle::after,
 .pane-swap-handle.is-active::after {
-  background: rgba(120, 180, 234, 0.62);
+  background: transparent;
 }
 
 .pane-header.is-active,
@@ -666,6 +657,7 @@ button:hover {
   align-items: center;
   height: 22px;
   min-width: 132px;
+  max-width: 220px;
   padding: 0 8px;
   border-radius: 4px;
   background: #2d2d30;
@@ -673,6 +665,8 @@ button:hover {
   font-size: 11px;
   line-height: 1;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pane-model-indicator.is-hidden {
@@ -944,16 +938,57 @@ button:hover {
   background: rgba(0, 0, 0, 0.2);
 }
 
+.pane-task-segment {
+  flex: 1 1 auto;
+  margin-left: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
 .pane-actions-group {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
 
+.pane-actions-overlay > .pane-actions-group:first-child {
+  flex: 1 1 auto;
+}
+
+.pane-actions-overlay > .pane-actions-group:last-child {
+  flex: 0 0 auto;
+}
+
 .pane-agent-segment .pane-path-btn {
   min-width: 62px;
+}
+
+.pane-task-name-input {
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: rgba(230, 236, 248, 0.74);
+  font-size: 11px;
+  line-height: 1;
+  outline: none;
+}
+
+.pane-task-name-input::placeholder {
+  color: rgba(205, 214, 233, 0.22);
+}
+
+.pane-task-name-input:focus-visible {
+  background: transparent;
+  color: rgba(239, 244, 255, 0.86);
 }
 
 .pane-utility-segment .pane-path-btn {
